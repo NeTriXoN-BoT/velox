@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible Velox issue
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Velox version
+      placeholder: 2.3.0
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What happened?
+      description: Include steps, expected behavior and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: System and relevant configuration
+      description: Windows version, CPU, GPU, RAM and phone settings. Omit personal identifiers.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or redacted diagnostics
+      description: Remove accounts, tokens, phone numbers, personal paths and app data.

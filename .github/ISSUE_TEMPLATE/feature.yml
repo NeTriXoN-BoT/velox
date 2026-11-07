@@ -1,0 +1,13 @@
+name: Feature request
+description: Suggest an improvement to Velox
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help you do?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested behavior

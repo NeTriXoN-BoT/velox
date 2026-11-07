@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Velox Helper: lets the launcher on the PC set the phone's wallpaper in one click.
+     It has no screen, no internet access and no storage access. Only adb (the shell user, which
+     holds android.permission.DUMP) can talk to it. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="app.velox.helper"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+
+    <application
+        android:label="Velox Helper"
+        android:allowBackup="false"
+        android:hasCode="true">
+        <provider
+            android:name=".WallpaperProvider"
+            android:authorities="app.velox.helper"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

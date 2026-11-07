@@ -1,0 +1,109 @@
+# Velox changelog, newest first.
+# A version starts with "<version> | <date>", followed by [New]
+- A dark Velox installer with English/German setup, optional desktop shortcut and data-preserving uninstall.
+- Hands-off first-run startup and language defaults, with an optional main-phone auto-start setting.
+- English and German for desktop Velox, Home, Settings and controller tools, with per-phone language sync.
+- Screen resolution shortcut in the phone toolbar., [Improved]
+- Hardware-aware 48/64 CPU and RAM choices, disabled unsupported allocations, separate physical/logical CPU counts and safe lower-host resolution.
+- Recommendations consider the active desktop resolution/refresh, GPU memory type, available RAM and other running phones.
+- Clean dark text fields without gray cue-banner backgrounds or duplicate search text. and [Fixed]
+- Android CPU limits are detected after boot; unsupported allocations are disabled and resource reservations corrected.
+- First-run setup language and existing-SDK actions no longer overlap. sections
+# of "- " lines. Velox shows it on the Updates page; release\make-release.ps1 turns the newest
+# version's lines into the update notes.
+
+2.3.0 | 2026-11-07
+[New]
+- Velox Instances: create and run independent phones together with a shared SDK, separate apps/accounts/saves/controls, and individual start, stop and controls windows.
+- Combined CPU/RAM allocation checks, unique connection ports and verified process ownership keep simultaneous phones separate.
+- Velox Vault: verified cold phone backups, staged recovery into a separate phone, Undo restore and interrupted-recovery rollback.
+- Per-game presets for display, 30-144 FPS, CPU, memory, graphics and fullscreen, with a restart review and separate global settings.
+- Controller Studio: Xbox-compatible and DirectInput controllers, native non-root Android gamepad input, touch buttons/sticks, dead zones, sensitivity and camera-Y inversion.
+[Improved]
+- Four individually designed Velox-chan wallpapers with everyday clothes, fine anime linework and atmospheric scenes: After Hours, Blue Hour, Stargazer and Windowlight.
+- Recovery stays accessible when phone data is missing but a matching Android SDK is available.
+- Sidebar spacing accommodates Recovery without overlapping the phone status panel.
+[Fixed]
+- A matching window title or port alone can no longer make Velox adopt an unrelated emulator process.
+- Concurrent phone backups have unique names, and large backup checksum operations respond to cancellation between reads.
+- Recovery paths support non-English folder names; prepared disk files stay protected until activation and locks release after failures.
+- Recovery rejects unsafe file paths, changed payloads, unmatched Android images and unexpected disk backing chains.
+- Restores retain Android's system-image identity marker so the emulator preserves their writable disks and installed apps.
+- Phone numbers loaded from settings or backups are validated before building emulator arguments.
+- Guest disk writes are flushed before the phone stops.
+- The optional Windows hypervisor setup resolves DISM from the Windows system directory.
+
+2.2.0 | 2026-11-06
+[New]
+- High-end allocations up to 64 virtual CPU cores and 64 GB RAM, with host limits and memory reserved for Windows. Auto remains conservative.
+[Fixed]
+- The native emulator toolbar no longer overlaps Velox controls; detection handles Qt's actual window title and delayed window creation.
+- Native controls return when the custom toolbar is turned off or Velox closes, and stay hidden while the phone is minimized.
+- Missing Android configuration folders are created and checked before launch, preventing a first-start error loop.
+- Excessive startup logging stops the failed phone; diagnostic reads are bounded and oversized logs cannot authorize snapshot resume.
+- Setup checks extraction-job configuration and thread startup failures before continuing.
+- Completed setup refreshes Android discovery on the UI thread, avoiding concurrent path updates.
+- Toolbar tooltips return after the phone restarts; explicitly showing native controls places them beside Velox controls.
+[Improved]
+- First-time setup validated with fresh Google downloads, a separate SDK/profile/AVD and only Windows system tools on PATH.
+
+2.1.0 | 2026-11-06
+[New]
+- A Velox side toolbar with navigation, sound, rotation lock, fullscreen, captures, recording and game controls; dock, collapse and reorder its buttons.
+- A game library with real app icons, search, favorites, recent apps, game labels and launch-on-start.
+- Control Studio: place and drag keyboard/mouse bindings on the phone, including taps, WASD movement, swipes and mouse aim.
+- Separate saved control layouts for each game and for portrait/landscape; mapped input stays inside the focused phone and releases on focus loss.
+- Velox Home for Android, with wallpaper-backed app grids, search, games, favorites, recent apps and adaptive layouts.
+- Velox Settings for Android, with Home appearance options, synchronized orientation/navigation preferences and Android settings shortcuts.
+[Improved]
+- Games can be marked manually when their Android metadata doesn't identify them as games.
+- Game input uses a persistent private multi-touch connection without Root or an accessibility service.
+- The launcher and Android companion share Velox's dark violet/blue design.
+- Home search reuses cached app icons and metadata; favorite and game changes refresh while Home stays open.
+- Recording survives a launcher restart, shows its active state and accepts output paths containing spaces.
+[Fixed]
+- Companion and wallpaper-helper APKs are verified against the embedded build before privileged shell use; incompatible signatures fail safely.
+- Command output and execution time are bounded; failed APK/package sessions cannot be mistaken for successful installs.
+- Update versions, checksums, HTTPS configuration and extraction process setup now reject malformed or incomplete results.
+- Cold boots accept the reverse-navigation overlay's aligned, uncompressed resources.
+- Home keeps its header visible after rotation and respects Android system-bar insets.
+- Mapping stays active independently of toolbar visibility and releases contacts on focus loss; opposing movement keys retain valid touch state.
+- The Windows executable contains one explicit application manifest.
+
+2.0.0 | 2026-11-04
+[New]
+- App bundle import for APKS, XAPK and APKM, with compatible split selection and OBB game-data placement.
+- Both three-button orders: Back/Home/Recents and Recents/Home/Back, alongside gestures.
+- Three-button Android navigation by default, with a live choice of buttons or gestures on Display.
+- Automatic phone rotation follows games between portrait and landscape, with a live switch on Display.
+- Four original Velox-chan wallpapers with distinct adult women, scenes and activities, included in Look and new builds.
+- New name and icon: Gaming Phone is now Velox.
+- A sidebar layout with Home, Display, Performance, Look, Phone, System and Updates pages.
+- Five animated boot screens (Orbit, Hyperdrive, Neon Grid, Terminal, Minimal), or a random one each start.
+- Best settings picked for your PC on first start; "Use recommended" brings them back.
+- Nine mouse cursors for the phone, from Neon and Crosshair to Pixel and Scope.
+- Wallpaper packs: add your own pictures and set them on the phone in one click.
+- Automatic Velox branding on wallpapers: Badge, Signature or Poster.
+- A System page with live CPU, GPU and memory use, the phone's own share and your PC's specs.
+- Live screen FPS with a graph, screen recording, rotate, and drag-and-drop file transfer.
+- An optional phone-shaped device frame.
+- One-click root setup with Magisk.
+- First-run setup for other PCs: downloads Android from Google and checks every file.
+- Signed automatic updates.
+[Improved]
+- Emulator controls default to Dark on first use; later theme choices are preserved.
+- Automatic rotation reacts as soon as Android reports an orientation change and batches turns without pauses between commands.
+- More choices: Full HD and Foldable screens, up to 6 CPU cores, 3 to 12 GB of memory, and software graphics for weaker PCs.
+- Closing the phone takes about 4 seconds instead of 20 or more.
+- Settings are kept next to Velox.exe, so they're the same however Velox is opened.
+[Fixed]
+- The loading screen stays attached to the phone display while its window is moved.
+- Building from a project folder with spaces now finds the version header for Windows resources.
+- "Restart to apply" no longer fails after you change settings.
+- Instant start only resumes a cleanly saved phone, so nothing you did since is lost.
+- Velox never touches other emulators running on the PC.
+- Clear messages when the phone can't start, with a log for the details.
+
+1.0.0
+[New]
+- First version: display and refresh-rate presets, root mode, snappy animations, performance boost, APK install and screenshots.

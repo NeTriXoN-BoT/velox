@@ -1,0 +1,4 @@
+﻿rootAVD by newbit (GPL-3.0), https://gitlab.com/newbit/rootAVD
+Taken at commit 613caa44. One change: the call to AllowPermissionsTo3rdPartyAPKs is replaced by a
+no-op, so setting up root does not give every installed app full storage access.
+Gaming Phone runs this script inside the emulator to patch the phone's ramdisk with Magisk.

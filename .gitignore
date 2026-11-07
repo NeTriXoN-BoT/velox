@@ -1,0 +1,17 @@
+/build/
+/dist/
+/keys/
+/data/
+/Android/
+/work/
+/outputs/
+/.vs/
+/.vscode/
+*.log
+*.tmp
+*.part
+*.keystore
+*.pass
+*.key
+*.idsig
+*.vbackup/

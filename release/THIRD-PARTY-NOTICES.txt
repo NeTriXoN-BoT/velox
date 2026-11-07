@@ -1,0 +1,37 @@
+Velox uses the following third-party software.
+
+ANDROID OPEN SOURCE PROJECT LAUNCHER3 TASKBAR LAYOUT - Apache License 2.0
+The optional native navigation overlay derives from the Launcher3 taskbar
+layout. Velox changes the navigation container's direction and preserves
+the original resource IDs and other controls. Source:
+https://android.googlesource.com/platform/packages/apps/Launcher3/
+License and modification notes are in licenses\navigation.
+
+ANDROID EMULATOR, PLATFORM TOOLS AND SYSTEM IMAGE (Google)
+Not included in this download. On first start Velox downloads them from
+https://dl.google.com/android/repository/ after you accept the Android
+Software Development Kit License Agreement
+(https://developer.android.com/studio/terms).
+
+MAGISK (topjohnwu) - GNU General Public License v3.0
+Not included. Downloaded on request ("Set up root") from the official
+release: https://github.com/topjohnwu/Magisk/releases/tag/v31.1
+Source code: https://github.com/topjohnwu/Magisk
+
+ROOTAVD (newbit) - GNU General Public License v3.0
+Velox.exe contains a copy of rootAVD.sh, which it runs inside the phone to
+patch the phone's ramdisk with Magisk. The exact script used (with one
+change, described in licenses\rootAVD\SOURCE.txt) and its license are in
+licenses\rootAVD. Original source: https://gitlab.com/newbit/rootAVD
+
+VELOX HELPER (part of Velox)
+A tiny Android app that Velox installs on the phone the first time you set a
+wallpaper. It has no screen, no internet access and no storage access, and
+only adb can talk to it.
+
+VELOX HOME AND SETTINGS (part of Velox)
+Original native Android interfaces and a desktop bridge, built from the
+included companion source. There is no internet permission or telemetry.
+The app catalog/preferences bridge requires Android's DUMP permission.
+The desktop verifies the companion APK before starting the private input
+connection as its already-authorized adb shell.

@@ -1,0 +1,39 @@
+// Windows resources for Velox.exe: icon, manifest, version details and built-in files.
+#include <winver.h>
+#include "version.h"
+
+1 ICON "../build/velox.ico"
+1 24 "app.manifest"
+
+// rootAVD (GPL-3.0), run inside the phone to set up root. See third_party/rootAVD.
+200 RCDATA "../third_party/rootAVD/rootAVD.sh"
+// The helper app that sets wallpapers. Built from gaming-phone/helper by build.ps1.
+201 RCDATA "../build/helper.apk"
+202 RCDATA "../CHANGELOG.txt"
+203 RCDATA "../navigation/VeloxNavOrder.apk"
+204 RCDATA "../tools/import-package.ps1"
+205 RCDATA "../navigation/stock-taskbar.xml"
+206 RCDATA "../build/nav-guard.sh"
+207 RCDATA "../build/companion.apk"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     GP_VERSION_MAJOR, GP_VERSION_MINOR, GP_VERSION_PATCH, 0
+PRODUCTVERSION  GP_VERSION_MAJOR, GP_VERSION_MINOR, GP_VERSION_PATCH, 0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription",  "Velox"
+            VALUE "FileVersion",      GP_VERSION_STRING
+            VALUE "ProductName",      "Velox"
+            VALUE "ProductVersion",   GP_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
