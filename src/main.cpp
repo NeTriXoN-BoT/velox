@@ -1253,7 +1253,7 @@ void refreshInstances() {
 
 void drawInstances(gp::Graphics &gr) {
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Velox instances"), i18n::text(L"A separate phone for every account and play style."));
+    pageHeader(gr, i18n::text(L"Velox instances"), i18n::text(L"Stop a phone and close its controls before removing it."));
     card(gr, gp::RectF(x, dp(96), w, dp(70)));
     int active = 0, ram = 0, cores = 0;
     for (auto &i : g.phones)
@@ -1301,21 +1301,38 @@ void drawInstances(gp::Graphics &gr) {
              : !info.error.empty() ? info.error
                                    : i18n::text(L"Ready for its own apps, accounts and games"),
              gp::RectF(x + dp(58), y + dp(41), w - dp(78), dp(22)), *g.fSmall, !info.active && !info.error.empty() ? C_BAD : C_DIM);
-        button(gr, gp::RectF(x + dp(17), y + dp(75), dp(161), dp(29)), i18n::text(L"Open controls"), Btn::Secondary, !g.busy,
+        const float actionsX = x + dp(16), gap = dp(8), actionW = (w - dp(32) - 3 * gap) / 4;
+        button(gr, gp::RectF(actionsX, y + dp(75), actionW, dp(29)), i18n::text(L"Open controls"), Btn::Secondary, !g.busy,
                [info] { instances::command(info.id, instances::Command::Open, reporter()); });
-        button(gr, gp::RectF(x + dp(187), y + dp(75), dp(145), dp(29)),
+        button(gr, gp::RectF(actionsX + actionW + gap, y + dp(75), actionW, dp(29)),
                info.starting ? i18n::text(L"Starting…")
                : info.active ? i18n::text(L"Stop phone")
                              : i18n::text(L"Start phone"),
                info.active ? Btn::Secondary : Btn::Primary, !g.busy && !info.starting,
                [info] { instances::command(info.id, info.active ? instances::Command::Stop : instances::Command::Start, reporter()); });
-        button(gr, gp::RectF(x + w - dp(174), y + dp(75), dp(157), dp(29)), i18n::text(L"Close controls"), Btn::Ghost,
+        button(gr, gp::RectF(actionsX + 2 * (actionW + gap), y + dp(75), actionW, dp(29)), i18n::text(L"Close controls"), Btn::Ghost,
                !g.busy && info.window && !info.current,
                [info] { instances::command(info.id, instances::Command::CloseControls, reporter()); });
+        button(gr, gp::RectF(actionsX + 3 * (actionW + gap), y + dp(75), actionW, dp(29)),
+               info.id.empty() ? i18n::text(L"Main phone") : i18n::text(L"Remove phone"), Btn::Ghost,
+               !g.busy && !info.id.empty() && !info.current && !info.active && !info.starting && !info.window,
+               [info] {
+                   studio::confirm(g.hwnd, i18n::text(L"Remove phone"),
+                                   i18n::text(L"Move this phone to the Windows Recycle Bin?") + std::wstring(L"\n\n") + info.name +
+                                       L"\n\n" + i18n::text(L"Its apps, accounts, saves and settings move with it. The main phone, shared Android and external backups stay in place. Restore its folder from the Recycle Bin to undo. Disk space is freed when you empty it.") +
+                                       L"\n\n" + i18n::text(L"Folder to restore: ") + info.id,
+                                   i18n::text(L"Move to Recycle Bin"), [info](bool accepted) {
+                                       if (accepted)
+                                           tool([info] {
+                                               instances::recycle(info.id, reporter());
+                                               PostMessageW(g.hwnd, WM_APP + 56, 0, 0);
+                                           });
+                                   });
+               });
     }
     button(gr, gp::RectF(x, dp(578), dp(108), dp(30)), i18n::text(L"Previous"), Btn::Ghost, g.instancePage > 0, [] { --g.instancePage; });
-    text(gr, i18n::text(L"Each phone has its own CPU and RAM settings."), gp::RectF(x + dp(115), dp(579), w - dp(230), dp(28)), *g.fSmall,
-         C_DIM, gp::StringAlignmentCenter);
+    button(gr, gp::RectF(x + (w - dp(180)) / 2, dp(578), dp(180), dp(30)), i18n::text(L"Recycle Bin"), Btn::Ghost, true,
+           [] { ShellExecuteW(g.hwnd, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); });
     button(gr, gp::RectF(x + w - dp(108), dp(578), dp(108), dp(30)), i18n::text(L"Next"), Btn::Ghost,
            (g.instancePage + 1) * 3 < int(g.phones.size()), [] { ++g.instancePage; });
 }

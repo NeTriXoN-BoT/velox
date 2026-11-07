@@ -15,7 +15,7 @@ struct Hit {
 };
 struct Window {
     HWND hwnd = nullptr, owner = nullptr;
-    int type = 0, hover = -1, pressed = -1;
+    int type = 0, hover = -1, pressed = -1, bodyHeight = 113;
     float scale = 1;
     experience::AppInfo app;
     Settings global;
@@ -26,7 +26,19 @@ struct Window {
     std::wstring error, title, message, accept;
     std::function<void(bool)> callback;
     bool creating = true;
-    int height() const { return type == 2 ? 340 : type == 1 ? 650 : 660; }
+    int height() const { return type == 2 ? bodyHeight + 227 : type == 1 ? 650 : 660; }
+    void measureConfirmation() {
+        if (type != 2)
+            return;
+        gp::Bitmap bitmap(1, 1, PixelFormat32bppARGB);
+        gp::Graphics graphics(&bitmap);
+        gp::Font font(L"Segoe UI", 14, gp::FontStyleRegular, gp::UnitPixel);
+        gp::StringFormat format;
+        gp::RectF measured;
+        auto display = i18n::tr(message);
+        graphics.MeasureString(display.c_str(), -1, &font, gp::RectF(0, 0, 624, 1000), &format, &measured);
+        bodyHeight = std::clamp(int(measured.Height + 20), 113, 360);
+    }
     void text(gp::Graphics &g, const std::wstring &s, float x, float y, float w, float h, float size = 13, gp::ARGB color = C_TEXT,
               bool bold = false, bool centered = false, bool raw = false) {
         gp::Font font(L"Segoe UI", size, bold ? gp::FontStyleBold : gp::FontStyleRegular, gp::UnitPixel);
@@ -81,14 +93,14 @@ struct Window {
         text(g,
              type == 0   ? i18n::text(L"GAME PRESETS")
              : type == 1 ? i18n::text(L"CONTROLLER STUDIO")
-                         : i18n::text(L"VELOX RECOVERY"),
+                         : i18n::text(L"VELOX · CONFIRM"),
              86, 25, 600, 25, 18, C_TEXT, true);
         text(g, type == 2 ? title : app.label, 86, 51, 600, 23, 13, C_DIM, false, false, type != 2);
         if (type == 2) {
-            card(g, 28, 100, 664, 135);
-            text(g, message, 48, 110, 624, 113, 14, C_TEXT);
-            button(g, i18n::text(L"Cancel"), gp::RectF(385, 278, 140, 38), [this] { close(false); });
-            button(g, accept, gp::RectF(537, 278, 155, 38), [this] { close(true); }, true);
+            card(g, 28, 100, 664, float(bodyHeight + 22));
+            text(g, message, 48, 110, 624, float(bodyHeight), 14, C_TEXT);
+            button(g, i18n::text(L"Cancel"), gp::RectF(385, float(height() - 62), 140, 38), [this] { close(false); });
+            button(g, accept, gp::RectF(537, float(height() - 62), 155, 38), [this] { close(true); }, true);
             return;
         }
         if (type == 0) {
@@ -368,6 +380,7 @@ void open(Window *c) {
         cls.hIcon = LoadIconW(cls.hInstance, MAKEINTRESOURCEW(1));
         registered = RegisterClassW(&cls) != 0;
     }
+    c->measureConfirmation();
     UINT dpi = c->owner ? GetDpiForWindow(c->owner) : GetDpiForSystem();
     MONITORINFO monitor{};
     monitor.cbSize = sizeof(monitor);

@@ -19,6 +19,7 @@ int port();
 Command initialCommand();
 std::vector<Info> list();
 bool create(const std::wstring &sdk, const Report &report);
+bool recycle(const std::wstring &id, const Report &report);
 bool command(const std::wstring &id, Command action, const Report &report);
 HWND window(const std::wstring &id);
 bool otherLaunchers();

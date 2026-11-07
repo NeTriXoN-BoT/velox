@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <iphlpapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -228,6 +229,113 @@ std::wstring quote(const std::wstring &s) {
     out.append(n * 2, L'\\');
     return out + L"\"";
 }
+
+std::wstring mutexFor(const std::wstring &key) {
+    uint64_t hash = 1469598103934665603ull;
+    for (wchar_t c : baseDataFolder()) {
+        hash ^= towlower(c);
+        hash *= 1099511628211ull;
+    }
+    std::wostringstream s;
+    s << L"Local\\VeloxLauncher-" << std::hex << hash << L"-" << key;
+    return s.str();
+}
+
+struct LauncherGuard {
+    HANDLE handle = nullptr;
+    bool owned = false;
+    explicit LauncherGuard(const std::wstring &key) {
+        handle = CreateMutexW(nullptr, TRUE, mutexFor(key).c_str());
+        owned = handle && GetLastError() != ERROR_ALREADY_EXISTS;
+    }
+    ~LauncherGuard() {
+        if (owned)
+            ReleaseMutex(handle);
+        if (handle)
+            CloseHandle(handle);
+    }
+};
+
+struct ComRelease {
+    void operator()(IUnknown *value) const {
+        if (value)
+            value->Release();
+    }
+};
+
+// Refuse a permanent-delete callback, even if Windows cannot recycle this folder.
+class RecycleGuard final : public IFileOperationProgressSink {
+    LONG references = 1;
+  public:
+    bool rejected = false, recycled = false;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
+        if (!out)
+            return E_POINTER;
+        *out = nullptr;
+        if (iid != IID_IUnknown && iid != __uuidof(IFileOperationProgressSink))
+            return E_NOINTERFACE;
+        *out = static_cast<IFileOperationProgressSink *>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&references); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG left = InterlockedDecrement(&references);
+        if (!left)
+            delete this;
+        return left;
+    }
+    HRESULT STDMETHODCALLTYPE StartOperations() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE FinishOperations(HRESULT) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreRenameItem(DWORD, IShellItem *, LPCWSTR) override { return E_ABORT; }
+    HRESULT STDMETHODCALLTYPE PostRenameItem(DWORD, IShellItem *, LPCWSTR, HRESULT, IShellItem *) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreMoveItem(DWORD, IShellItem *, IShellItem *, LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PostMoveItem(DWORD, IShellItem *, IShellItem *, LPCWSTR, HRESULT, IShellItem *) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreCopyItem(DWORD, IShellItem *, IShellItem *, LPCWSTR) override { return E_ABORT; }
+    HRESULT STDMETHODCALLTYPE PostCopyItem(DWORD, IShellItem *, IShellItem *, LPCWSTR, HRESULT, IShellItem *) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PreDeleteItem(DWORD flags, IShellItem *) override {
+        rejected = !(flags & TSF_DELETE_RECYCLE_IF_POSSIBLE);
+        return rejected ? E_ABORT : S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PostDeleteItem(DWORD, IShellItem *, HRESULT result, IShellItem *created) override {
+        recycled = SUCCEEDED(result) && created;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PreNewItem(DWORD, IShellItem *, LPCWSTR) override { return E_ABORT; }
+    HRESULT STDMETHODCALLTYPE PostNewItem(DWORD, IShellItem *, LPCWSTR, LPCWSTR, DWORD, HRESULT, IShellItem *) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE UpdateProgress(UINT, UINT) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResetTimer() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE PauseTimer() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ResumeTimer() override { return S_OK; }
+};
+
+std::wstring resolved(const fs::path &path) {
+    auto full = fs::absolute(path).lexically_normal().wstring();
+    HANDLE handle = CreateFileW(full.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+        return full;
+    DWORD length = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    std::vector<wchar_t> buffer(length ? length + 1 : 1);
+    DWORD copied = length ? GetFinalPathNameByHandleW(handle, buffer.data(), DWORD(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) : 0;
+    CloseHandle(handle);
+    if (copied && copied < buffer.size()) {
+        full.assign(buffer.data(), copied);
+        if (full.rfind(L"\\\\?\\UNC\\", 0) == 0)
+            full = L"\\\\" + full.substr(8);
+        else if (full.rfind(L"\\\\?\\", 0) == 0)
+            full.erase(0, 4);
+    }
+    return full;
+}
+bool inside(const std::wstring &path, const fs::path &parent) {
+    if (path.empty())
+        return false;
+    auto child = resolved(path), base = resolved(parent);
+    return CompareStringOrdinal(child.c_str(), int(child.size()), base.c_str(), int(base.size()), TRUE) == CSTR_EQUAL ||
+           (child.size() > base.size() && child[base.size()] == L'\\' &&
+            CompareStringOrdinal(child.c_str(), int(base.size()), base.c_str(), int(base.size()), TRUE) == CSTR_EQUAL);
+}
 } // namespace
 const std::wstring &id() {
     return selected;
@@ -248,14 +356,7 @@ std::wstring windowClass() {
     return classFor(selected);
 }
 std::wstring mutexName() {
-    uint64_t hash = 1469598103934665603ull;
-    for (wchar_t c : baseDataFolder()) {
-        hash ^= towlower(c);
-        hash *= 1099511628211ull;
-    }
-    std::wostringstream s;
-    s << L"Local\\VeloxLauncher-" << std::hex << hash << L"-" << selected;
-    return s.str();
+    return mutexFor(selected);
 }
 HWND window(const std::wstring &key) {
     struct Query {
@@ -319,7 +420,7 @@ std::vector<Info> list() {
                         out.push_back(read(e.path().filename().wstring()));
                     } catch (...) {
                     }
-                    if (out.size() >= 9)
+                    if (out.size() >= 65)
                         break;
                 }
             }
@@ -379,6 +480,62 @@ bool create(const std::wstring &sdk, const Report &report) {
                                                    L"\r\n");
         need(MoveFileExW(stage.c_str(), final.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE, "Couldn't publish the new phone.");
         report(label + L" created. Android is shared; its apps and data are separate.", false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+bool recycle(const std::wstring &key, const Report &report) {
+    try {
+        need(valid(key) && key != selected, "Only another stopped additional phone with closed controls can be removed.");
+        Gate gate;
+        need(gate.locked, "Another phone is being prepared. Try again in a moment.");
+        LauncherGuard launcher(key);
+        need(launcher.owned, "Stop this phone and close its controls before removing it.");
+        auto catalog = fs::absolute(root()).lexically_normal();
+        auto target = (catalog / key).lexically_normal();
+        need(target.parent_path() == catalog && target.filename() == key, "Invalid instance folder.");
+        plain(target.wstring());
+        plain(meta(key));
+        need(exists(meta(key)) && fs::file_size(meta(key)) < 65536, "This phone is no longer available.");
+        auto info = read(key);
+        need(!info.active && !info.starting && !info.window, "Stop this phone and close its controls before removing it.");
+        need(!inside(paths().sdk, target) && !inside(info.sdk, target), "This phone contains an Android SDK. Move the SDK before removing it.");
+        for (const auto &other : list()) {
+            need(!inside(other.sdk, target), "This phone contains an Android SDK. Move the SDK before removing it.");
+            if (other.id != key)
+                need(!inside(get(other.data + L"\\settings.ini", L"launcher", L"home"), target),
+                     "Another phone uses this folder. Choose separate phone storage before removing it.");
+        }
+        for (const auto &entry : fs::recursive_directory_iterator(target)) {
+            auto attributes = GetFileAttributesW(entry.path().c_str());
+            need(attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
+                 "This phone contains a link or cloud placeholder. Its files were not removed.");
+        }
+        struct Apartment {
+            HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+        } apartment;
+        need(SUCCEEDED(apartment.result), "Windows file operations are unavailable. The phone was not removed.");
+        IFileOperation *rawOperation = nullptr;
+        need(SUCCEEDED(CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rawOperation))),
+             "Windows file operations are unavailable. The phone was not removed.");
+        std::unique_ptr<IFileOperation, ComRelease> operation(rawOperation);
+        IShellItem *rawItem = nullptr;
+        need(SUCCEEDED(SHCreateItemFromParsingName(target.c_str(), nullptr, IID_PPV_ARGS(&rawItem))), "Couldn't open the phone folder.");
+        std::unique_ptr<IShellItem, ComRelease> item(rawItem);
+        std::unique_ptr<RecycleGuard, ComRelease> sink(new RecycleGuard);
+        auto flags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE |
+                     FOFX_ADDUNDORECORD;
+        need(SUCCEEDED(operation->SetOperationFlags(flags)) && SUCCEEDED(operation->DeleteItem(item.get(), sink.get())),
+             "Windows couldn't prepare the Recycle Bin operation. The phone was not removed.");
+        HRESULT result = operation->PerformOperations();
+        BOOL aborted = TRUE;
+        operation->GetAnyOperationsAborted(&aborted);
+        need(SUCCEEDED(result) && !aborted && !sink->rejected && sink->recycled && !exists(target.wstring()),
+             "Windows couldn't recycle this phone. Close files in use and check the Recycle Bin settings; permanent deletion was not requested.");
+        report(info.name + i18n::text(L" moved to the Recycle Bin. Restore its folder there to undo removal."), false);
         return true;
     } catch (const std::exception &e) {
         report(widen(e.what()), true);
@@ -477,6 +634,25 @@ bool reserve(const Settings &s, std::wstring &error) {
         need(gate.locked, "Another phone is starting. Try again in a moment.");
         if (!budget(s, error))
             return false;
+        if (!selected.empty()) {
+            auto phones = list();
+            need(phones.size() <= 9, "Too many phones are present. Remove another additional phone before starting this one.");
+            std::set<int> used;
+            for (const auto &other : phones)
+                if (other.id != selected)
+                    used.insert(other.port);
+            if (used.count(selectedPort)) {
+                int replacement = 0;
+                for (int candidate = 5582; candidate <= 5682; candidate += 2)
+                    if (!used.count(candidate) && available(candidate)) {
+                        replacement = candidate;
+                        break;
+                    }
+                need(replacement != 0, "No free Android emulator connection ports are available.");
+                write(meta(selected), L"[instance]\r\nname=" + name() + L"\r\nport=" + std::to_wstring(replacement) + L"\r\n");
+                selectedPort = replacement;
+            }
+        }
         need(available(port()), "This phone's connection ports are already in use. Close its previous emulator before starting it again.");
         std::lock_guard<std::mutex> lock(runtimeLock);
         runtime = {GetCurrentProcessId(), 0, born(GetCurrentProcessId()), 0, coresFor(s), memoryFor(s), port(), paths().sdk};

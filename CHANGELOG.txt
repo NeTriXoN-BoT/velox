@@ -2,6 +2,16 @@
 # Each version has [New], [Improved] and [Fixed] sections with "- " entries.
 # The launcher displays this file and the release builder signs its current entries.
 
+2.4.0 | 2026-11-07
+[New]
+- Remove stopped additional phones from Instances with confirmation and Windows Recycle Bin recovery. The main phone and shared Android SDK stay protected.
+- Open the Recycle Bin directly from Instances to recover a removed phone or reclaim its storage.
+[Improved]
+- Confirmation dialogs fit their message text, including longer German explanations.
+- Restored phones automatically resolve reused connection ports; extra restored profiles remain visible for cleanup.
+[Fixed]
+- Removal checks active guests and launcher ownership again under the allocation lock and blocks unsafe links or embedded shared SDKs.
+
 2.3.1 | 2026-11-07
 [Fixed]
 - Release entries now appear in their proper changelog sections and the Updates page.

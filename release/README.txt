@@ -42,6 +42,14 @@ TIPS
 - The phones share the SDK files. Creating another phone does not download Android
   again. Updates are managed from the main window; close other controls windows
   before installing an update. Their Android guests can remain running.
+- Instances > Remove phone removes a stopped additional phone after its controls
+  have closed. Review its name, then confirm Move to Recycle Bin. The main phone,
+  shared SDK and files outside that instance's managed folder are protected.
+  Use the Recycle Bin button, select the folder ID shown in the confirmation,
+  and choose Restore to undo removal. Storage is reclaimed when you empty that
+  item from the Windows Recycle Bin yourself. Keep a free additional-phone slot
+  before restoring; the installation supports eight additional phones.
+  A restored phone picks a free connection port if its old port has been reused.
 - Library: search and open installed apps, keep favorites and see recently played
   games. Right-click an app to mark it as a game or edit its controls.
 - Game presets: use a library card's gear or right-click > Game preset to choose
