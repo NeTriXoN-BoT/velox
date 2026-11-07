@@ -5,6 +5,34 @@
   &nbsp;
   <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-2.3.1.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
 </p>
+
+> [!IMPORTANT]
+> **Windows publisher warning:** `Velox.exe` and the installer are currently **unsigned**. Windows may show **“Unknown publisher”** or **“Windows protected your PC.”**
+> Before opening a download, check its SHA-256 against [SHA256SUMS.txt from the same release](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.3.1/SHA256SUMS.txt). Follow the [verification and Windows warning guide](docs/VERIFY-DOWNLOADS.md) ([Deutsch](docs/VERIFY-DOWNLOADS.de.md)).
+
+<details>
+<summary>Quick check before installing (PowerShell)</summary>
+
+Download the file and `SHA256SUMS.txt` from the same official release. Open PowerShell in the folder containing your download and run **only the command for the file you downloaded**:
+
+Installer:
+
+```powershell
+Get-FileHash -LiteralPath '.\Velox-Setup-2.3.1.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
+```
+
+Portable ZIP:
+
+```powershell
+Get-FileHash -LiteralPath '.\Velox-2.3.1.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
+```
+
+Compare all 64 characters in `Hash` with the line for that filename in `SHA256SUMS.txt`; upper/lowercase does not matter. If they differ, do not open or install the file. A match confirms that it matches the published release; it does not certify that software is safe or provide a verified publisher.
+
+After checking the source and hash, if you choose to proceed and SmartScreen offers it, select **More info → Run anyway**. Do not disable Windows protection or bypass an administrator's policy. Stop if antivirus reports a specific threat. [Full instructions](docs/VERIFY-DOWNLOADS.md).
+
+</details>
+
 <p align="center">
   <a href="https://github.com/NeTriXoN-BoT/velox/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NeTriXoN-BoT/velox?color=8864ff&label=release"></a>
   <img alt="Windows 10 and 11 x64" src="https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-477bff">
@@ -35,7 +63,7 @@ The launcher is native C++ and Win32. Android components download directly from 
 
 ### Get started
 
-1. Download the **installer** for a per-user installation, or extract the **portable ZIP** into a writable folder.
+1. Download the **installer** or **portable ZIP** and [verify it before opening](docs/VERIFY-DOWNLOADS.md). Then run the installer for a per-user installation, or extract the ZIP into a writable folder.
 2. Open **Velox**, choose English or Deutsch, and accept Google's SDK terms to download and set up Android.
 3. If prompted, enable Windows Hypervisor Platform and restart. Virtualization must also be enabled in firmware.
 4. The main phone starts after setup. Sign in to Google Play and install your games.

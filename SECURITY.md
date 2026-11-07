@@ -6,4 +6,6 @@ Include the affected release, a minimal reproduction, impact and relevant redact
 
 Security fixes target the latest release. Older versions may require an update. Velox's signed update channel is separate from Windows Authenticode; current Windows binaries do not have a publisher certificate.
 
+For installation warnings and checksum instructions, see [Verify a download](docs/VERIFY-DOWNLOADS.md) ([Deutsch](docs/VERIFY-DOWNLOADS.de.md)).
+
 Root is optional and changes Android's security model. Backups are unencrypted. Store them privately. Android, Google Play, games and controller drivers have their own security and compatibility requirements.
