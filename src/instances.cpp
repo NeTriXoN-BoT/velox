@@ -14,7 +14,7 @@ namespace phone::instances {
 namespace fs = std::filesystem;
 namespace {
 std::wstring selected;
-int selectedPort = 5580;
+std::atomic<int> selectedPort{5580};
 Command intent = Command::Open;
 std::mutex runtimeLock;
 struct Runtime {
@@ -344,7 +344,7 @@ std::wstring dataPath(const std::wstring &primary) {
     return selected.empty() ? primary : primary + L"\\instances\\" + selected + L"\\data";
 }
 int port() {
-    return selectedPort;
+    return selectedPort.load();
 }
 Command initialCommand() {
     return intent;
