@@ -1,6 +1,9 @@
 #include "playtools.hpp"
 #include "experience.hpp"
 #include "controllers.hpp"
+#include "presets.hpp"
+#include <set>
+#include <stdexcept>
 #include "art.hpp"
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -1079,35 +1082,30 @@ void enabled(bool on) {
     current.enabled = on;
     persist();
 }
-void selectProfile(const std::wstring &package, bool landscape) {
-    if (!safePackage(package))
-        return;
-    std::lock_guard<std::mutex> g(lock);
-    if (editingNow || (current.package == package && current.landscape == landscape))
-        return;
-    cancel();
-    current = Profile{};
-    current.package = package;
-    current.landscape = landscape;
-    auto file = profilePath();
-    current.padMode = std::clamp(int(GetPrivateProfileIntW(L"controls", L"padmode", 0, file.c_str())), 0, 2);
-    current.padLayout = std::clamp(int(GetPrivateProfileIntW(L"controls", L"padlayout", 0, file.c_str())), 0, 3);
+namespace {
+Profile readProfile(const std::wstring &package, bool landscape) {
+    Profile out;
+    out.package = package;
+    out.landscape = landscape;
+    auto file = dataFolder() + L"\\controls\\" + package + (landscape ? L"-landscape.ini" : L"-portrait.ini");
+    out.padMode = std::clamp(int(GetPrivateProfileIntW(L"controls", L"padmode", 0, file.c_str())), 0, 2);
+    out.padLayout = std::clamp(int(GetPrivateProfileIntW(L"controls", L"padlayout", 0, file.c_str())), 0, 3);
     wchar_t device[128]{};
     GetPrivateProfileStringW(L"controls", L"paddevice", L"", device, 128, file.c_str());
-    current.padDevice = device;
+    out.padDevice = device;
     auto number = [&](const wchar_t *key, float fallback, float low, float high) {
         wchar_t value[64]{};
         GetPrivateProfileStringW(L"controls", key, L"", value, 64, file.c_str());
         float n = *value ? wcstof(value, nullptr) : fallback;
         return std::isfinite(n) ? std::clamp(n, low, high) : fallback;
     };
-    current.deadzone = number(L"deadzone", .18f, .05f, .4f);
-    current.sensitivity = number(L"sensitivity", 1.f, .5f, 2.f);
-    current.invertY = GetPrivateProfileIntW(L"controls", L"inverty", 0, file.c_str()) != 0;
-    current.enabled = GetPrivateProfileIntW(L"controls", L"enabled", 0, profilePath().c_str()) != 0;
+    out.deadzone = number(L"deadzone", .18f, .05f, .4f);
+    out.sensitivity = number(L"sensitivity", 1.f, .5f, 2.f);
+    out.invertY = GetPrivateProfileIntW(L"controls", L"inverty", 0, file.c_str()) != 0;
+    out.enabled = GetPrivateProfileIntW(L"controls", L"enabled", 0, file.c_str()) != 0;
     for (int i = 0; i < 14; i++) {
         wchar_t value[256];
-        GetPrivateProfileStringW(L"controls", (L"binding" + std::to_wstring(i)).c_str(), L"", value, 256, profilePath().c_str());
+        GetPrivateProfileStringW(L"controls", (L"binding" + std::to_wstring(i)).c_str(), L"", value, 256, file.c_str());
         if (!*value)
             break;
         std::wstring s = value;
@@ -1124,10 +1122,321 @@ void selectProfile(const std::wstring &package, bool landscape) {
         b.x2 = std::clamp(b.x2, 0.f, 1.f);
         b.y2 = std::clamp(b.y2, 0.f, 1.f);
         b.radius = std::clamp(b.radius, .02f, .3f);
-        current.bindings.push_back(b);
+        out.bindings.push_back(b);
     }
+    return out;
+}
+} // namespace
+void selectProfile(const std::wstring &package, bool landscape) {
+    if (!safePackage(package))
+        return;
+    std::lock_guard<std::mutex> g(lock);
+    if (editingNow || (current.package == package && current.landscape == landscape))
+        return;
+    cancel();
+    current = Profile{};
+    current.package = package;
+    current.landscape = landscape;
+    current = readProfile(package, landscape);
     message = current.bindings.empty() ? i18n::text(L"No bindings yet. Open Control Studio to add them.")
                                        : i18n::text(L"Controls loaded for this game.");
+}
+
+namespace {
+void layoutNeed(bool ok, const char *message) {
+    if (!ok)
+        throw std::runtime_error(message);
+}
+void layoutPlain(const std::wstring &path) {
+    std::filesystem::path built;
+    for (const auto &part : std::filesystem::absolute(path)) {
+        built /= part;
+        auto a = GetFileAttributesW(built.c_str());
+        layoutNeed(a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_REPARSE_POINT),
+                   "Control files cannot use links or cloud placeholders.");
+    }
+}
+struct Layout {
+    std::wstring package;
+    presets::Preset preset;
+    std::array<Profile, 2> profiles;
+};
+std::string controlsText(const Profile &p) {
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << "[controls]\nenabled=" << p.enabled << "\npadmode=" << p.padMode << "\npadlayout=" << p.padLayout
+        << "\npaddevice=\ndeadzone=" << p.deadzone << "\nsensitivity=" << p.sensitivity << "\ninverty=" << p.invertY << '\n';
+    for (size_t i = 0; i < p.bindings.size(); ++i) {
+        auto &b = p.bindings[i];
+        out << "binding" << i << '=' << int(b.kind) << ',' << b.key << ',' << b.x << ',' << b.y << ',' << b.x2 << ',' << b.y2 << ','
+            << b.radius << '\n';
+    }
+    return out.str();
+}
+std::string presetText(const presets::Preset &v) {
+    return "[preset]\nenabled=" + std::to_string(v.enabled) + "\ndisplay=" + std::to_string(v.display) +
+           "\nrate=" + std::to_string(v.rate) + "\ncores=" + std::to_string(v.cores) + "\nmemory=" + std::to_string(v.memory) +
+           "\ngpu=" + std::to_string(v.gpu) + "\nfullscreen=" + std::to_string(v.fullscreen) + "\n";
+}
+Layout parseLayout(const std::wstring &file) {
+    layoutPlain(file);
+    layoutNeed(std::filesystem::is_regular_file(file) && std::filesystem::file_size(file) <= 65536,
+               "Choose a Velox controls file smaller than 64 KB.");
+    std::ifstream in(std::filesystem::path(file), std::ios::binary);
+    in.imbue(std::locale::classic());
+    std::string tag, package;
+    int version = 0;
+    Layout l;
+    layoutNeed(bool(in >> tag >> version) && tag == "velox-controls" && version == 1, "Unsupported Velox controls format.");
+    layoutNeed(bool(in >> tag >> package) && tag == "package", "The controls file has no game identity.");
+    l.package = widen(package);
+    layoutNeed(safePackage(l.package), "Invalid Android package in controls file.");
+    auto &p = l.preset;
+    int on = 0;
+    layoutNeed(bool(in >> tag >> on >> p.display >> p.rate >> p.cores >> p.memory >> p.gpu >> p.fullscreen) && tag == "preset" && on >= 0 &&
+                   on <= 1,
+               "Invalid game preset.");
+    p.enabled = on;
+    auto choice = [](int n, const std::vector<int> &options) { return std::find(options.begin(), options.end(), n) != options.end(); };
+    layoutNeed(p.display >= -1 && p.display < int(displays().size()) && (p.rate == 0 || choice(p.rate, refreshRates())) &&
+                   (p.cores == -1 || choice(p.cores, coreChoices())) && (p.memory == -1 || choice(p.memory, memoryChoices())) &&
+                   p.gpu >= -1 && p.gpu <= 2 && p.fullscreen >= -1 && p.fullscreen <= 1,
+               "The preset contains unsupported values.");
+    for (int orientation = 0; orientation < 2; ++orientation) {
+        auto &profile = l.profiles[orientation];
+        int direction = -1, enabled = 0, invert = 0, count = 0;
+        layoutNeed(bool(in >> tag >> direction >> enabled >> profile.padMode >> profile.padLayout >> profile.deadzone >>
+                        profile.sensitivity >> invert >> count) &&
+                       tag == "profile" && direction == orientation && enabled >= 0 && enabled <= 1 && invert >= 0 && invert <= 1 &&
+                       profile.padMode >= 0 && profile.padMode <= 2 && profile.padLayout >= 0 && profile.padLayout <= 3 &&
+                       std::isfinite(profile.deadzone) && profile.deadzone >= .05f && profile.deadzone <= .4f &&
+                       std::isfinite(profile.sensitivity) && profile.sensitivity >= .5f && profile.sensitivity <= 2 && count >= 0 &&
+                       count <= 14,
+                   "Invalid portrait or landscape controller profile.");
+        profile.package = l.package;
+        profile.landscape = orientation;
+        profile.enabled = enabled;
+        profile.invertY = invert;
+        std::set<int> keys;
+        for (int n = 0; n < count; ++n) {
+            int kind = -1;
+            Binding b;
+            layoutNeed(bool(in >> tag >> kind >> b.key >> b.x >> b.y >> b.x2 >> b.y2 >> b.radius) && tag == "binding" && kind >= 0 &&
+                           kind <= 5 && b.key >= 1 && b.key < 256 + controllers::Count && !reservedKey(b.key) &&
+                           keys.insert(b.key).second && std::isfinite(b.x + b.y + b.x2 + b.y2 + b.radius) && b.x >= 0 && b.x <= 1 &&
+                           b.y >= 0 && b.y <= 1 && b.x2 >= 0 && b.x2 <= 1 && b.y2 >= 0 && b.y2 <= 1 && b.radius >= .02f && b.radius <= .3f,
+                       "Invalid or duplicate control binding.");
+            b.kind = static_cast<Kind>(kind);
+            profile.bindings.push_back(b);
+        }
+    }
+    layoutNeed(bool(in >> tag) && tag == "end" && !(in >> tag), "The controls file has unexpected trailing data.");
+    return l;
+}
+void layoutWrite(const std::wstring &file, const std::string &bytes) {
+    layoutPlain(file);
+    createDirs(std::filesystem::path(file).parent_path().wstring());
+    std::ofstream out(std::filesystem::path(file), std::ios::binary | std::ios::trunc);
+    out.write(bytes.data(), bytes.size());
+    out.close();
+    layoutNeed(out.good(), "Couldn't write controls. Check free space and folder access.");
+}
+} // namespace
+
+namespace {
+struct LayoutJournal {
+    std::wstring folder, package;
+    unsigned had = 0;
+    int state = 0;
+};
+std::wstring layoutJournalFile() {
+    return dataFolder() + L"\\layout-last.txt";
+}
+std::array<std::wstring, 3> layoutTargets(const std::wstring &package) {
+    return {dataFolder() + L"\\controls\\" + package + L"-portrait.ini", dataFolder() + L"\\controls\\" + package + L"-landscape.ini",
+            dataFolder() + L"\\presets\\" + package + L".ini"};
+}
+LayoutJournal layoutJournal() {
+    auto file = layoutJournalFile();
+    layoutPlain(file);
+    if (!exists(file))
+        return {};
+    layoutNeed(std::filesystem::file_size(file) < 1024, "The previous controls import journal is invalid.");
+    std::ifstream in{std::filesystem::path(file)};
+    std::string magic, folder, package, extra;
+    LayoutJournal j;
+    layoutNeed(bool(in >> magic >> folder >> package >> j.had >> j.state) && magic == "velox-layout-import-1" && !(in >> extra) &&
+                   folder.size() < 64 && !folder.empty() && folder.find_first_not_of("0123456789-") == std::string::npos &&
+                   safePackage(widen(package)) && j.had <= 7 && j.state >= 0 && j.state <= 2,
+               "The previous controls import journal is invalid.");
+    j.folder = widen(folder);
+    j.package = widen(package);
+    return j;
+}
+void saveLayoutJournal(const LayoutJournal &j) {
+    auto file = layoutJournalFile();
+    auto fresh = file + L".new";
+    layoutWrite(fresh, "velox-layout-import-1\n" + narrow(j.folder) + "\n" + narrow(j.package) + "\n" + std::to_string(j.had) + "\n" +
+                           std::to_string(j.state) + "\n");
+    layoutPlain(file);
+    layoutNeed(MoveFileExW(fresh.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+               "Couldn't save the controls import journal.");
+}
+void revertLayoutJournal(LayoutJournal j) {
+    layoutNeed(!j.folder.empty() && j.state != 2, "There is no controls import to undo.");
+    auto history = dataFolder() + L"\\layout-history\\" + j.folder;
+    auto targets = layoutTargets(j.package);
+    layoutPlain(history);
+    for (int i = 0; i < 3; ++i) {
+        layoutPlain(targets[i]);
+        auto original = history + L"\\" + std::to_wstring(i) + L".ini";
+        layoutPlain(original);
+        if (j.had & (1u << i))
+            layoutNeed(std::filesystem::is_regular_file(original) && std::filesystem::file_size(original) < (1u << 20),
+                       "A previous controls file is missing. Its history was kept.");
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (j.had & (1u << i)) {
+            auto fresh = targets[i] + L".undo-new";
+            layoutPlain(fresh);
+            layoutNeed(CopyFileW((history + L"\\" + std::to_wstring(i) + L".ini").c_str(), fresh.c_str(), FALSE) &&
+                           MoveFileExW(fresh.c_str(), targets[i].c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+                       "Couldn't restore previous controls. Their history was kept.");
+        } else if (exists(targets[i]))
+            layoutNeed(DeleteFileW(targets[i].c_str()), "Couldn't undo a newly imported controls file.");
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, targets[i].c_str());
+    }
+    j.state = 2;
+    saveLayoutJournal(j);
+    presets::invalidate();
+    if (current.package == j.package)
+        current = readProfile(j.package, current.landscape);
+}
+} // namespace
+bool canUndoImport() {
+    try {
+        auto j = layoutJournal();
+        return !j.folder.empty() && j.state != 2;
+    } catch (...) {
+        return false;
+    }
+}
+bool undoImport(const Report &report) {
+    try {
+        std::lock_guard<std::mutex> guard(lock);
+        layoutNeed(!editingNow, "Close Control Studio before undoing an import.");
+        cancel();
+        revertLayoutJournal(layoutJournal());
+        report(i18n::text(L"Previous game setup restored. Import history is kept."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+bool exportLayout(const std::wstring &package, const std::wstring &file, const Report &report) {
+    try {
+        layoutNeed(safePackage(package), "Choose a game before exporting its controls.");
+        std::lock_guard<std::mutex> guard(lock);
+        auto p = presets::load(package);
+        std::ostringstream out;
+        out.imbue(std::locale::classic());
+        out << "velox-controls 1\npackage " << narrow(package) << "\npreset " << p.enabled << ' ' << p.display << ' ' << p.rate << ' '
+            << p.cores << ' ' << p.memory << ' ' << p.gpu << ' ' << p.fullscreen << '\n';
+        for (int o = 0; o < 2; ++o) {
+            auto profile = readProfile(package, o);
+            out << "profile " << o << ' ' << profile.enabled << ' ' << profile.padMode << ' ' << profile.padLayout << ' '
+                << profile.deadzone << ' ' << profile.sensitivity << ' ' << profile.invertY << ' ' << profile.bindings.size() << '\n';
+            for (auto &b : profile.bindings)
+                out << "binding " << int(b.kind) << ' ' << b.key << ' ' << b.x << ' ' << b.y << ' ' << b.x2 << ' ' << b.y2 << ' '
+                    << b.radius << '\n';
+        }
+        out << "end\n";
+        auto fresh = file + L".new-" + std::to_wstring(GetCurrentProcessId());
+        layoutPlain(file);
+        layoutWrite(fresh, out.str());
+        parseLayout(fresh);
+        layoutNeed(MoveFileExW(fresh.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+                   "Couldn't publish the controls file.");
+        report(i18n::text(L"Controls and game preset exported. No accounts or device IDs are included."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+LayoutInfo inspectLayout(const std::wstring &file) {
+    LayoutInfo out;
+    try {
+        auto l = parseLayout(file);
+        out.package = l.package;
+        out.bindings = l.profiles[0].bindings.size() + l.profiles[1].bindings.size();
+        out.valid = true;
+    } catch (const std::exception &e) {
+        out.error = widen(e.what());
+    }
+    return out;
+}
+bool importLayout(const std::wstring &file, const std::wstring &expectedPackage, const Report &report) {
+    try {
+        auto previous = layoutJournal();
+        layoutNeed(previous.folder.empty() || previous.state != 0, "Finish or undo the interrupted controls import first.");
+        auto layout = parseLayout(file);
+        layoutNeed(layout.package == expectedPackage, "The controls file changed. Review it again before importing.");
+        std::lock_guard<std::mutex> guard(lock);
+        layoutNeed(!editingNow, "Close Control Studio before importing a layout.");
+        cancel();
+        auto token = std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(GetCurrentProcessId());
+        auto history = dataFolder() + L"\\layout-history\\" + token;
+        layoutPlain(history);
+        createDirs(history);
+        std::array<std::wstring, 3> targets = {dataFolder() + L"\\controls\\" + layout.package + L"-portrait.ini",
+                                               dataFolder() + L"\\controls\\" + layout.package + L"-landscape.ini",
+                                               dataFolder() + L"\\presets\\" + layout.package + L".ini"};
+        std::array<std::string, 3> bytes = {controlsText(layout.profiles[0]), controlsText(layout.profiles[1]), presetText(layout.preset)};
+        std::array<bool, 3> had{};
+        for (int i = 0; i < 3; ++i) {
+            layoutPlain(targets[i]);
+            had[i] = exists(targets[i]);
+            if (had[i])
+                layoutNeed(CopyFileW(targets[i].c_str(), (history + L"\\" + std::to_wstring(i) + L".ini").c_str(), TRUE),
+                           "Couldn't preserve the previous controls.");
+            layoutWrite(targets[i] + L".import-new", bytes[i]);
+        }
+        LayoutJournal journal{token, layout.package, 0, 0};
+        for (int i = 0; i < 3; ++i)
+            if (had[i])
+                journal.had |= 1u << i;
+        saveLayoutJournal(journal);
+        int changed = 0;
+        try {
+            for (int i = 0; i < 3; ++i) {
+                layoutNeed(MoveFileExW((targets[i] + L".import-new").c_str(), targets[i].c_str(),
+                                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+                           "Couldn't activate imported controls.");
+                ++changed;
+                WritePrivateProfileStringW(nullptr, nullptr, nullptr, targets[i].c_str());
+            }
+        } catch (...) {
+            for (int i = 0; i < changed; ++i) {
+                if (had[i])
+                    CopyFileW((history + L"\\" + std::to_wstring(i) + L".ini").c_str(), targets[i].c_str(), FALSE);
+                else
+                    DeleteFileW(targets[i].c_str());
+            }
+            throw;
+        }
+        journal.state = 1;
+        saveLayoutJournal(journal);
+        presets::invalidate();
+        if (current.package == layout.package)
+            current = layout.profiles[current.landscape ? 1 : 0];
+        report(i18n::text(L"Controls imported. Previous layouts are kept in layout-history."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
 }
 void pollPhone() {
     if (state != State::Running) {
@@ -1143,6 +1452,13 @@ void pollPhone() {
     }
 }
 void initialize(HWND owner) {
+    try {
+        auto j = layoutJournal();
+        if (!j.folder.empty() && j.state == 0)
+            revertLayoutJournal(j);
+    } catch (const std::exception &e) {
+        message = widen(e.what());
+    }
     launcher = owner;
     order.clear();
     for (size_t i = 0; i < tools.size(); i++)

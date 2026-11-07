@@ -1,10 +1,10 @@
 <p align="center"><img src="docs/assets/velox-banner.png" alt="Velox — Deine Spiele. Dein Handy. Dein Platz." width="100%"></p>
 
-<p align="center"><a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-Setup-2.4.0.exe"><b>Windows-Installer herunterladen</b></a> &nbsp;·&nbsp; <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-2.4.0.zip"><b>Portable ZIP herunterladen</b></a> &nbsp;·&nbsp; <a href="README.md">English</a></p>
+<p align="center"><a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/Velox-Setup-2.5.0.exe"><b>Windows-Installer herunterladen</b></a> &nbsp;·&nbsp; <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/Velox-2.5.0.zip"><b>Portable ZIP herunterladen</b></a> &nbsp;·&nbsp; <a href="README.md">English</a></p>
 
 > [!IMPORTANT]
 > **Windows-Herausgeberwarnung:** `Velox.exe` und der Installer sind derzeit **nicht signiert**. Windows kann **„Unbekannter Herausgeber“** oder **„Der Computer wurde durch Windows geschützt“** anzeigen.
-> Prüfe vor dem Öffnen den SHA-256-Wert anhand der [SHA256SUMS.txt aus derselben Version](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.4.0/SHA256SUMS.txt). Hier findest du die [Anleitung zur Dateiprüfung und zur Windows-Warnung](docs/VERIFY-DOWNLOADS.de.md).
+> Prüfe vor dem Öffnen den SHA-256-Wert anhand der [SHA256SUMS.txt aus derselben Version](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/SHA256SUMS.txt). Hier findest du die [Anleitung zur Dateiprüfung und zur Windows-Warnung](docs/VERIFY-DOWNLOADS.de.md).
 
 <details>
 <summary>Vor der Installation prüfen (PowerShell)</summary>
@@ -14,13 +14,13 @@ Lade die Datei und `SHA256SUMS.txt` aus demselben offiziellen Release herunter. 
 Installer:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-Setup-2.4.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-Setup-2.5.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Portable ZIP:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-2.4.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-2.5.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Vergleiche alle 64 Zeichen unter `Hash` mit der Zeile für genau diesen Dateinamen in `SHA256SUMS.txt`. Groß- und Kleinschreibung sind dabei egal. Bei einer Abweichung darfst du die Datei nicht öffnen oder installieren. Ein Treffer bestätigt die Übereinstimmung mit dem veröffentlichten Release; er bestätigt weder die Unbedenklichkeit noch einen verifizierten Herausgeber.
@@ -54,6 +54,12 @@ Vorausgesetzt werden ein Intel-/AMD-PC mit **Windows 10 ab Version 2004 oder Win
 - **Gestaltung:** Eigene Werkzeugleiste, Cursor, Startanimationen, vier unterschiedliche Velox-chan-Hintergründe und eigene Bilder.
 
 Velox wählt sichere Voreinstellungen. **Handy → Handy mit Velox starten** steuert den automatischen Start des Haupthandys. Bestehende Einstellungen werden beibehalten. Weitere Handys starten nur auf Anforderung.
+
+### Mehr Platz für deine Einstellungen
+
+**Instanzen → Verwalten** bietet Namen, frische Vorlagen, vollständige Klone, Speicherübersicht, sichere Bereinigung und geprüfte Speicherwechsel mit Rückgängig. **Velox Focus** regelt Anzeige und Ton im Hintergrund. **Velox Share** überträgt Spielsteuerung und Profile. **Velox Care** ergänzt begrenzte Sicherungszeitpläne, Startabbruch und Reparatur.
+
+Der [Handyverwaltungs-Leitfaden](docs/PHONE-MANAGEMENT.de.md) erklärt, was kopiert wird, welche Daten privat bleiben und wie Rückgängig funktioniert.
 
 ### Daten und Kompatibilität
 

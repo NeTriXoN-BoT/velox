@@ -479,6 +479,64 @@ void copyTree(const std::wstring &from, const std::wstring &to) {
         }
     }
 }
+void configureCopy(const std::wstring &target, const Manifest &m, const std::wstring &image) {
+    auto avd = target + L"\\avd\\Gaming_Phone.avd";
+    uint64_t partition = 32ull << 30;
+    for (auto &f : m.files)
+        if (f.name.rfind(L"avd/", 0) == 0 && (fs::path(f.name).extension() == L".qcow2" || fs::path(f.name).extension() == L".img")) {
+            auto file = avd + L"\\" + f.name.substr(4);
+            unsigned char magic[4]{};
+            std::ifstream disk(fs::path(file), std::ios::binary);
+            disk.read(reinterpret_cast<char *>(magic), 4);
+            disk.close();
+            if (be32(magic) != 0x514649fb) {
+                demand(fs::path(f.name).extension() != L".qcow2", "Invalid QCOW2 disk signature.");
+                continue;
+            }
+            auto size = rebase(file, m, avd, image);
+            if (f.name == L"avd/userdata-qemu.img.qcow2")
+                partition = size;
+        }
+    std::ofstream cfg(fs::path(avd + L"\\config.ini"), std::ios::binary | std::ios::trunc);
+    cfg << "AvdId=Gaming_Phone\navd.ini.displayname=Velox\navd.ini.encoding=UTF-8\nPlayStore.enabled=true\nabi.type=x86_64\nhw.cpu."
+           "arch=x86_64\ntag.id=google_apis_playstore\ntag.display=Google Play\nimage.sysdir.1="
+        << narrow(m.imageRelative)
+        << "/\nhw.device.name=pixel_7\nhw.device.manufacturer=Google\nhw.keyboard=yes\nhw.mainKeys=no\nhw.accelerometer=yes\nhw."
+           "gyroscope=yes\nhw.sensors.orientation=yes\nhw.sensors.proximity=yes\nhw.battery=yes\nhw.gps=yes\nhw.camera.back="
+           "emulated\nhw.camera.front=emulated\nhw.audioInput=yes\nhw.audioOutput=yes\nhw.sdCard=yes\nsdcard.size=2048M\nvm.heapSize="
+           "576\nhw.cpu.ncore=4\nhw.ramSize=4096\nhw.lcd.width=1080\nhw.lcd.height=2400\nhw.lcd.density=420\nhw.gpu.enabled=yes\nhw."
+           "gpu.mode=host\ndisk.dataPartition.size="
+        << ((partition + (1 << 20) - 1) >> 20) << "M\nfastboot.forceColdBoot=yes\nshowDeviceFrame=no\n";
+    cfg.close();
+    demand(cfg.good(), "Couldn't prepare recovered phone settings.");
+    std::ofstream ini(fs::path(target + L"\\avd\\Gaming_Phone.ini"), std::ios::binary);
+    ini << "avd.ini.encoding=UTF-8\npath=" << narrow(avd) << "\npath.rel=avd/Gaming_Phone.avd\ntarget=android-35\n";
+    ini.close();
+    demand(ini.good(), "Couldn't register the recovered phone.");
+    // The selected emulator uses QEMU2. The system-image version marker is
+    // essential too: drive-share.cpp recreates every overlay when it is absent.
+    std::ofstream engine(fs::path(avd + L"\\qemu-version.txt"), std::ios::binary);
+    engine << "2";
+    engine.close();
+    demand(engine.good(), "Couldn't preserve the recovered disk engine identity.");
+    std::string incremental;
+    std::ifstream properties(fs::path(image + L"\\build.prop"));
+    demand(fs::file_size(image + L"\\build.prop") < (1u << 20), "Android build properties exceed the supported size.");
+    for (std::string line; std::getline(properties, line);)
+        if (line.rfind("ro.build.version.incremental=", 0) == 0) {
+            incremental = line.substr(29);
+            while (!incremental.empty() && (incremental.back() == '\r' || incremental.back() == ' '))
+                incremental.pop_back();
+            break;
+        }
+    demand(!incremental.empty() && incremental.size() <= 10 && incremental.find_first_not_of("0123456789") == std::string::npos &&
+               std::stoull(incremental) <= 2147483647,
+           "The Android image has no supported incremental build identity.");
+    std::ofstream version(fs::path(avd + L"\\version_num.cache"), std::ios::binary);
+    version << incremental << '\n';
+    version.close();
+    demand(version.good(), "Couldn't preserve the recovered system-image identity.");
+}
 void rollback(const Report &report) {
     auto t = transaction(), journal = t + L"\\journal.ini";
     noLinks(t);
@@ -553,7 +611,12 @@ std::vector<Entry> list() {
     }
     return out;
 }
-bool create(const Report &report) {
+bool createBackup(bool automatic, const Report &report) {
+    instances::Maintenance lease(instances::id());
+    if (!lease.acquired) {
+        report(lease.error, true);
+        return false;
+    }
     Job job;
     if (!job.acquired)
         return false;
@@ -640,6 +703,40 @@ bool create(const Report &report) {
             demand(n <= (512ull << 30) && total <= (1ull << 40) - n, "The backup is too large.");
             total += n;
         }
+
+        if (automatic) {
+            auto policy = schedule();
+            auto owner = get(config(), L"schedule", L"owner");
+            if (owner.empty()) {
+                GUID guid{};
+                demand(SUCCEEDED(CoCreateGuid(&guid)), "Couldn't create a backup schedule identity.");
+                wchar_t encoded[48]{};
+                StringFromGUID2(guid, encoded, 48);
+                for (auto c : std::wstring(encoded))
+                    if (iswxdigit(c))
+                        owner += wchar_t(towlower(c));
+                put(config(), L"schedule", L"owner", owner);
+            }
+            uint64_t occupied = 0;
+            size_t count = 0;
+            size_t scanned = 0;
+            for (const auto &item : fs::directory_iterator(root)) {
+                demand(++scanned <= 10000, "The vault has too many entries for automatic backups. Move older backups out first.");
+                noLinks(item.path().wstring());
+                if (!item.is_directory() || item.path().extension() != L".vbackup")
+                    continue;
+                auto entry = inspect(item.path().wstring());
+                noLinks(entry.path);
+                if (get(entry.path + L"\\scheduled.ini", L"schedule", L"owner") != owner)
+                    continue;
+                demand(entry.valid && occupied <= (1ull << 50) - entry.bytes, "A scheduled recovery point needs attention.");
+                occupied += entry.bytes;
+                ++count;
+            }
+            demand(count < size_t(policy.keep) && total <= (uint64_t(policy.limitGB) << 30) &&
+                       occupied <= (uint64_t(policy.limitGB) << 30) - total,
+                   "Scheduled backup limit reached. Move older scheduled recovery points out of the vault, or raise the limit.");
+        }
         space(root, total);
         std::wstring stage = root + L"\\.partial-" + m.created, finished = root + L"\\Velox " + m.created + L".vbackup";
         demand(!exists(stage) && !exists(finished), "A backup with this timestamp already exists.");
@@ -668,12 +765,184 @@ bool create(const Report &report) {
         auto validated = readManifest(stage);
         verifyFiles(stage, validated, .7f, .29f);
         demand(state == State::Stopped && !emulatorRunning(), "The phone started during backup. The partial copy wasn't published.");
+        if (automatic)
+            put(stage + L"\\scheduled.ini", L"schedule", L"owner", get(config(), L"schedule", L"owner"));
         move(stage, finished);
+        if (automatic) {
+            FILETIME now{};
+            GetSystemTimeAsFileTime(&now);
+            put(config(), L"schedule", L"last", std::to_wstring(((uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime) / 10000000));
+            put(config(), L"schedule", L"status", i18n::text(L"Scheduled backup verified."));
+        }
         progress.set(1, i18n::text(L"Backup complete · file integrity verified"));
         report(i18n::text(L"Private phone backup created and verified."), false);
         return true;
     } catch (const std::exception &e) {
         report(widen(e.what()), true);
+        return false;
+    }
+}
+
+bool create(const Report &report) {
+    return createBackup(false, report);
+}
+Schedule schedule() {
+    Schedule out;
+    auto number = [&](const wchar_t *key, int fallback) {
+        return int(GetPrivateProfileIntW(L"schedule", key, fallback, config().c_str()));
+    };
+    out.days = number(L"days", 0);
+    if (out.days != 1 && out.days != 7)
+        out.days = 0;
+    out.keep = std::clamp(number(L"keep", 3), 1, 20);
+    out.limitGB = std::clamp(number(L"limit", 25), 5, 500);
+    out.last = _wcstoui64(get(config(), L"schedule", L"last", L"0").c_str(), nullptr, 10);
+    out.status = get(config(), L"schedule", L"status");
+    out.paused = number(L"paused", 0) != 0;
+    return out;
+}
+bool schedule(const Schedule &value) {
+    try {
+        demand((value.days == 0 || value.days == 1 || value.days == 7) && value.keep >= 1 && value.keep <= 20 && value.limitGB >= 5 &&
+                   value.limitGB <= 500,
+               "Invalid backup schedule limits.");
+        put(config(), L"schedule", L"days", std::to_wstring(value.days));
+        put(config(), L"schedule", L"keep", std::to_wstring(value.keep));
+        put(config(), L"schedule", L"limit", std::to_wstring(value.limitGB));
+        put(config(), L"schedule", L"attempt", L"0");
+        put(config(), L"schedule", L"paused", L"0");
+        put(config(), L"schedule", L"status", L"");
+        flushIni(config());
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+bool scheduleDue() {
+    auto policy = schedule();
+    if (!policy.days || policy.paused || state != State::Stopped || progress.running || blocked() || !installed())
+        return false;
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    auto now = ((uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000000;
+    auto attempt = _wcstoui64(get(config(), L"schedule", L"attempt", L"0").c_str(), nullptr, 10);
+    return now >= policy.last && now - policy.last >= uint64_t(policy.days) * 86400 && now >= attempt && now - attempt >= 3600;
+}
+bool runScheduled(const Report &report) {
+    if (!scheduleDue())
+        return false;
+    try {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        put(config(), L"schedule", L"attempt", std::to_wstring(((uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000000));
+        auto capture = [&](const std::wstring &message, bool error) {
+            if (error)
+                try {
+                    put(config(), L"schedule", L"status", message.substr(0, 512));
+                    put(config(), L"schedule", L"paused", L"1");
+                } catch (...) {
+                }
+            report(message, error);
+        };
+        return createBackup(true, capture);
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+bool copyPhone(const Paths &source, const std::wstring &destination, const Report &report) {
+    Job job;
+    if (!job.acquired)
+        return false;
+    bool created = false;
+    try {
+        demand(!source.avdDir.empty() && fs::path(source.avdDir).is_absolute() && isDir(source.avdDir) &&
+                   exists(source.avdDir + L"\\config.ini"),
+               "Phone storage was not found. Choose a valid phone folder before maintenance.");
+        noLinks(source.avdDir);
+        noLinks(destination);
+        demand(!exists(destination), "Choose a new destination folder for the phone copy.");
+        demand(!inside(destination, source.avdDir) && !inside(source.avdDir, destination),
+               "The destination must be outside the current phone.");
+        Manifest m;
+        m.avd = absolute(source.avdDir);
+        std::ifstream configFile(fs::path(source.avdDir + L"\\config.ini"));
+        for (std::string line; std::getline(configFile, line);)
+            if (line.rfind("image.sysdir.1=", 0) == 0) {
+                m.imageRelative = slash(widen(line.substr(15)));
+                while (!m.imageRelative.empty() &&
+                       (m.imageRelative.back() == L'\r' || m.imageRelative.back() == L'/' || m.imageRelative.back() == L' '))
+                    m.imageRelative.pop_back();
+                break;
+            }
+        demand(relativeName(m.imageRelative) && m.imageRelative.rfind(L"system-images/", 0) == 0,
+               "The phone must use a system image inside the selected SDK.");
+        m.image = absolute(source.sdk + L"\\" + m.imageRelative);
+        noLinks(m.image);
+        struct Locks {
+            std::vector<HANDLE> handles;
+            ~Locks() {
+                for (auto h : handles)
+                    CloseHandle(h);
+            }
+            void add(const std::wstring &file) {
+                noLinks(file);
+                auto h =
+                    CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                demand(h != INVALID_HANDLE_VALUE, "Phone files are in use. Close the phone and other emulator tools first.");
+                handles.push_back(h);
+            }
+        } locks;
+        std::vector<std::pair<std::wstring, std::wstring>> files;
+        for (const auto &entry : fs::recursive_directory_iterator(source.avdDir)) {
+            checkCancel();
+            noLinks(entry.path().wstring());
+            if (entry.is_directory())
+                continue;
+            auto name = L"avd/" + slash(fs::relative(entry.path(), source.avdDir).wstring());
+            if (allowed(name)) {
+                demand(entry.is_regular_file() && files.size() < 100000, "Unsupported phone file or too many files.");
+                files.push_back({name, entry.path().wstring()});
+            }
+        }
+        if (!source.rootImage.empty() && exists(source.rootImage)) {
+            m.root = true;
+            files.push_back({L"root/ramdisk-root.img", source.rootImage});
+        }
+        demand(!files.empty(), "The source phone has no disks to copy.");
+        for (auto &file : files) {
+            locks.add(file.second);
+            auto size = fs::file_size(file.second);
+            demand(size <= (512ull << 30) && m.bytes <= (1ull << 40) - size, "The phone copy is too large.");
+            m.bytes += size;
+        }
+        for (auto name : {L"system.img", L"vendor.img", L"ramdisk.img", L"kernel-ranchu", L"build.prop"}) {
+            auto file = m.image + L"\\" + name;
+            locks.add(file);
+            m.bases.push_back({name, fs::file_size(file), checksum(file)});
+            demand(m.bases.back().hash.size() == 64, "Couldn't fingerprint the Android system image.");
+        }
+        space(fs::path(destination).parent_path().wstring(), m.bytes);
+        createDirs(destination);
+        created = isDir(destination);
+        uint64_t done = 0;
+        for (const auto &file : files) {
+            auto hash = checksum(file.second);
+            demand(hash.size() == 64, "Couldn't checksum a phone disk.");
+            auto relative = file.first.rfind(L"avd/", 0) == 0 ? L"avd/Gaming_Phone.avd/" + file.first.substr(4) : file.first;
+            auto target = destination + L"\\" + relative;
+            auto bytes = fs::file_size(file.second);
+            copy(file.second, target, done, m.bytes, 0, .9f);
+            demand(checksum(target) == hash, "A copied phone file failed its checksum.");
+            m.files.push_back({file.first, bytes, hash});
+            done += bytes;
+        }
+        checkCancel();
+        configureCopy(destination, m, m.image);
+        progress.set(1, i18n::text(L"Phone copy verified · original kept intact"));
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()) + (created ? std::wstring(L"\n") + i18n::text(L"Incomplete copy retained at: ") + destination : L""), true);
         return false;
     }
 }
@@ -725,62 +994,7 @@ std::optional<std::wstring> prepare(const std::wstring &backup, const Report &re
             demand(checksum(target + L"\\" + to) == f.hash, "A copied recovery file failed its checksum.");
             done += f.bytes;
         }
-        auto avd = target + L"\\avd\\Gaming_Phone.avd";
-        uint64_t partition = 32ull << 30;
-        for (auto &f : m.files)
-            if (f.name.rfind(L"avd/", 0) == 0 && (fs::path(f.name).extension() == L".qcow2" || fs::path(f.name).extension() == L".img")) {
-                auto file = avd + L"\\" + f.name.substr(4);
-                unsigned char magic[4]{};
-                std::ifstream disk(fs::path(file), std::ios::binary);
-                disk.read(reinterpret_cast<char *>(magic), 4);
-                disk.close();
-                if (be32(magic) != 0x514649fb) {
-                    demand(fs::path(f.name).extension() != L".qcow2", "Invalid QCOW2 disk signature.");
-                    continue;
-                }
-                auto size = rebase(file, m, avd, image);
-                if (f.name == L"avd/userdata-qemu.img.qcow2")
-                    partition = size;
-            }
-        std::ofstream cfg(fs::path(avd + L"\\config.ini"), std::ios::binary | std::ios::trunc);
-        cfg << "AvdId=Gaming_Phone\navd.ini.displayname=Velox\navd.ini.encoding=UTF-8\nPlayStore.enabled=true\nabi.type=x86_64\nhw.cpu."
-               "arch=x86_64\ntag.id=google_apis_playstore\ntag.display=Google Play\nimage.sysdir.1="
-            << narrow(m.imageRelative)
-            << "/\nhw.device.name=pixel_7\nhw.device.manufacturer=Google\nhw.keyboard=yes\nhw.mainKeys=no\nhw.accelerometer=yes\nhw."
-               "gyroscope=yes\nhw.sensors.orientation=yes\nhw.sensors.proximity=yes\nhw.battery=yes\nhw.gps=yes\nhw.camera.back="
-               "emulated\nhw.camera.front=emulated\nhw.audioInput=yes\nhw.audioOutput=yes\nhw.sdCard=yes\nsdcard.size=2048M\nvm.heapSize="
-               "576\nhw.cpu.ncore=4\nhw.ramSize=4096\nhw.lcd.width=1080\nhw.lcd.height=2400\nhw.lcd.density=420\nhw.gpu.enabled=yes\nhw."
-               "gpu.mode=host\ndisk.dataPartition.size="
-            << ((partition + (1 << 20) - 1) >> 20) << "M\nfastboot.forceColdBoot=yes\nshowDeviceFrame=no\n";
-        cfg.close();
-        demand(cfg.good(), "Couldn't prepare recovered phone settings.");
-        std::ofstream ini(fs::path(target + L"\\avd\\Gaming_Phone.ini"), std::ios::binary);
-        ini << "avd.ini.encoding=UTF-8\npath=" << narrow(avd) << "\npath.rel=avd/Gaming_Phone.avd\ntarget=android-35\n";
-        ini.close();
-        demand(ini.good(), "Couldn't register the recovered phone.");
-        // The selected emulator uses QEMU2. The system-image version marker is
-        // essential too: drive-share.cpp recreates every overlay when it is absent.
-        std::ofstream engine(fs::path(avd + L"\\qemu-version.txt"), std::ios::binary);
-        engine << "2";
-        engine.close();
-        demand(engine.good(), "Couldn't preserve the recovered disk engine identity.");
-        std::string incremental;
-        std::ifstream properties(fs::path(image + L"\\build.prop"));
-        demand(fs::file_size(image + L"\\build.prop") < (1u << 20), "Android build properties exceed the supported size.");
-        for (std::string line; std::getline(properties, line);)
-            if (line.rfind("ro.build.version.incremental=", 0) == 0) {
-                incremental = line.substr(29);
-                while (!incremental.empty() && (incremental.back() == '\r' || incremental.back() == ' '))
-                    incremental.pop_back();
-                break;
-            }
-        demand(!incremental.empty() && incremental.size() <= 10 && incremental.find_first_not_of("0123456789") == std::string::npos &&
-                   std::stoull(incremental) <= 2147483647,
-               "The Android image has no supported incremental build identity.");
-        std::ofstream version(fs::path(avd + L"\\version_num.cache"), std::ios::binary);
-        version << incremental << '\n';
-        version.close();
-        demand(version.good(), "Couldn't preserve the recovered system-image identity.");
+        configureCopy(target, m, image);
         // A ready marker is created last; activation never follows an incomplete staging folder.
         auto ready = target + L"\\ready.ini";
         put(ready, L"restore", L"sdk", paths().sdk);
@@ -826,8 +1040,10 @@ bool activate(const std::wstring &target, const Report &report) {
         auto fresh = t + L"\\new-settings.ini";
         demand(CopyFileW(iniPath().c_str(), fresh.c_str(), TRUE) != FALSE, "Couldn't stage settings.");
         auto from = target + L"\\desktop\\settings.ini";
-        for (auto k : {L"screen", L"hz", L"cpu", L"ram", L"gpu", L"root", L"snappy", L"boost", L"frame", L"bootscreen", L"bootstyle",
-                       L"cursor", L"brand", L"gesturenavigation", L"reversebuttons", L"autorotate", L"touches", L"number"})
+        for (auto k :
+             {L"screen",         L"hz",         L"cpu",        L"ram",       L"gpu",           L"root",          L"snappy",
+              L"boost",          L"frame",      L"bootscreen", L"bootstyle", L"cursor",        L"brand",         L"gesturenavigation",
+              L"reversebuttons", L"autorotate", L"touches",    L"number",    L"backgroundfps", L"backgroundmute"})
             put(fresh, L"launcher", k, get(from, L"launcher", k, get(iniPath(), L"launcher", k).c_str()));
         put(fresh, L"launcher", L"quickboot", L"0");
         put(fresh, L"launcher", L"sdk", sdk);

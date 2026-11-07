@@ -1,3 +1,21 @@
+2.5.0 | 2026-11-07
+[New]
+- Phone management with custom names, fresh settings/layout templates and verified full cold clones.
+- Per-phone storage usage, safe Recycle Bin cleanup and verified storage moves with Undo.
+- Velox Focus: optional background Android display limits and per-phone Windows audio muting.
+- Velox Share: export/import keyboard, mouse and controller layouts with game presets, review and Undo.
+- Velox Care: daily or weekly cold backups with recovery-count and storage limits that pause safely.
+- Cancel an owned startup and repair its next full boot without wiping apps, accounts or saves.
+[Improved]
+- Dedicated English/German management, storage, sharing, backup and repair views.
+- Per-phone maintenance leases keep disk copies separate from new starts and other running phones.
+[Fixed]
+- Interrupted controls imports recover their previous layouts and presets before input starts.
+- Background preferences refresh after live settings changes and restore when controls close.
+- Storage maintenance rejects missing/shared phone folders and preserves working-directory files.
+- Malformed Android preference revisions and null wallpaper access modes are rejected safely.
+- Combined RAM reservations account for the Android engine minimum without changing selected memory targets.
+
 # Velox changelog, newest first.
 # Each version has [New], [Improved] and [Fixed] sections with "- " entries.
 # The launcher displays this file and the release builder signs its current entries.

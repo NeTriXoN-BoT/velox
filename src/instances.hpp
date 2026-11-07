@@ -9,6 +9,29 @@ struct Info {
     bool active = false, starting = false, current = false;
     HWND window = nullptr;
 };
+// A per-phone lease prevents a second launcher from starting during a cold copy.
+class Maintenance {
+    HANDLE handle = nullptr;
+    HANDLE launcher = nullptr;
+
+  public:
+    bool acquired = false;
+    std::wstring error;
+    explicit Maintenance(const std::wstring &id);
+    ~Maintenance();
+    Maintenance(const Maintenance &) = delete;
+    Maintenance &operator=(const Maintenance &) = delete;
+};
+struct Storage {
+    uint64_t phone = 0, allocated = 0, reclaimable = 0, desktop = 0;
+    std::wstring id, home, previous, error;
+};
+bool rename(const std::wstring &id, const std::wstring &name, const Report &report);
+bool clone(const std::wstring &id, const std::wstring &name, bool full, const Report &report);
+Storage storage(const std::wstring &id);
+bool cleanup(const std::wstring &id, const Report &report);
+bool relocate(const std::wstring &id, const std::wstring &parent, const Report &report);
+bool undoRelocation(const std::wstring &id, const Report &report);
 bool configure(std::wstring &error);
 const std::wstring &id();
 std::wstring name();

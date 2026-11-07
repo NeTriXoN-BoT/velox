@@ -1,5 +1,6 @@
 #include "instances.hpp"
 #include "setup.hpp"
+#include "vault.hpp"
 #include <winsock2.h>
 #include <iphlpapi.h>
 #include <shellapi.h>
@@ -116,7 +117,8 @@ Info read(const std::wstring &key) {
     i.id = key;
     i.data = folder(key);
     i.current = key == selected;
-    i.name = key.empty() ? i18n::text(L"Main phone") : get(meta(key), L"instance", L"name", i18n::text(L"Velox phone"));
+    i.name = get(key.empty() ? baseDataFolder() + L"\\identity.ini" : meta(key), L"instance", L"name",
+                 key.empty() ? i18n::text(L"Main phone") : i18n::text(L"Velox phone"));
     i.name.resize(std::min<size_t>(40, i.name.size()));
     i.port = key.empty() ? 5580 : int(integer(meta(key), L"instance", L"port"));
     need(i.port >= 5554 && i.port <= 5682 && i.port % 2 == 0 && (key.empty() || i.port != 5580),
@@ -155,6 +157,8 @@ Info read(const std::wstring &key) {
                 i.memory = memoryFor(Settings{});
         }
     }
+    if (i.active)
+        i.memory = std::max(3, i.memory);
     return i;
 }
 bool available(int p) {
@@ -266,6 +270,7 @@ struct ComRelease {
 // Refuse a permanent-delete callback, even if Windows cannot recycle this folder.
 class RecycleGuard final : public IFileOperationProgressSink {
     LONG references = 1;
+
   public:
     bool rejected = false, recycled = false;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void **out) override {
@@ -317,7 +322,8 @@ std::wstring resolved(const fs::path &path) {
         return full;
     DWORD length = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
     std::vector<wchar_t> buffer(length ? length + 1 : 1);
-    DWORD copied = length ? GetFinalPathNameByHandleW(handle, buffer.data(), DWORD(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) : 0;
+    DWORD copied =
+        length ? GetFinalPathNameByHandleW(handle, buffer.data(), DWORD(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) : 0;
     CloseHandle(handle);
     if (copied && copied < buffer.size()) {
         full.assign(buffer.data(), copied);
@@ -336,6 +342,34 @@ bool inside(const std::wstring &path, const fs::path &parent) {
            (child.size() > base.size() && child[base.size()] == L'\\' &&
             CompareStringOrdinal(child.c_str(), int(base.size()), base.c_str(), int(base.size()), TRUE) == CSTR_EQUAL);
 }
+void recyclePath(const fs::path &target) {
+    struct Apartment {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        ~Apartment() {
+            if (SUCCEEDED(result))
+                CoUninitialize();
+        }
+    } apartment;
+    need(SUCCEEDED(apartment.result), "Windows file operations are unavailable. The phone was not removed.");
+    IFileOperation *rawOperation = nullptr;
+    need(SUCCEEDED(CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rawOperation))),
+         "Windows file operations are unavailable. The phone was not removed.");
+    std::unique_ptr<IFileOperation, ComRelease> operation(rawOperation);
+    IShellItem *rawItem = nullptr;
+    need(SUCCEEDED(SHCreateItemFromParsingName(target.c_str(), nullptr, IID_PPV_ARGS(&rawItem))), "Couldn't open the phone folder.");
+    std::unique_ptr<IShellItem, ComRelease> item(rawItem);
+    std::unique_ptr<RecycleGuard, ComRelease> sink(new RecycleGuard);
+    auto flags =
+        FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE | FOFX_ADDUNDORECORD;
+    need(SUCCEEDED(operation->SetOperationFlags(flags)) && SUCCEEDED(operation->DeleteItem(item.get(), sink.get())),
+         "Windows couldn't prepare the Recycle Bin operation. The phone was not removed.");
+    HRESULT result = operation->PerformOperations();
+    BOOL aborted = TRUE;
+    operation->GetAnyOperationsAborted(&aborted);
+    need(SUCCEEDED(result) && !aborted && !sink->rejected && sink->recycled && !exists(target.wstring()),
+         "Windows couldn't recycle this phone. Close files in use and check the Recycle Bin settings; permanent deletion was not "
+         "requested.");
+}
 } // namespace
 const std::wstring &id() {
     return selected;
@@ -350,7 +384,7 @@ Command initialCommand() {
     return intent;
 }
 std::wstring name() {
-    return selected.empty() ? i18n::text(L"Main phone") : get(meta(selected), L"instance", L"name", i18n::text(L"Velox phone"));
+    return read(selected).name;
 }
 std::wstring windowClass() {
     return classFor(selected);
@@ -430,6 +464,362 @@ std::vector<Info> list() {
     }
     return out;
 }
+
+Maintenance::Maintenance(const std::wstring &key) {
+    try {
+        need(key.empty() || valid(key), "Invalid instance identifier.");
+        Gate gate;
+        need(gate.locked, "Another phone is starting. Try again in a moment.");
+        handle = CreateMutexW(nullptr, FALSE, (mutexFor(key) + L"-maintenance").c_str());
+        need(handle != nullptr, "Couldn't protect the phone during maintenance.");
+        auto status = WaitForSingleObject(handle, 0);
+        acquired = status == WAIT_OBJECT_0 || status == WAIT_ABANDONED;
+        need(acquired, "This phone is already being maintained.");
+        if (key != selected) {
+            launcher = CreateMutexW(nullptr, TRUE, mutexFor(key).c_str());
+            bool owned = launcher && GetLastError() != ERROR_ALREADY_EXISTS;
+            if (!owned) {
+                if (launcher)
+                    CloseHandle(launcher);
+                launcher = nullptr;
+            }
+            need(owned, "Close this phone's controls before maintenance.");
+        }
+        auto info = read(key);
+        need(!info.active && !info.starting && (key == selected || !info.window),
+             "Stop this phone and close its other controls before maintenance.");
+        if (key == selected)
+            need(state == State::Stopped && !emulatorRunning(), "Stop the phone before maintenance.");
+        auto storeFor = [](const Info &phone) {
+            if (phone.current)
+                return paths().avdDir;
+            auto home = get(phone.data + L"\\settings.ini", L"launcher", L"home");
+            if (home.empty() && phone.id.empty())
+                home = envVar(L"USERPROFILE") + L"\\.android";
+            return home.empty() ? std::wstring() : home + L"\\avd\\Gaming_Phone.avd";
+        };
+        auto store = storeFor(info);
+        need(!store.empty() && fs::path(store).is_absolute() && isDir(store) && exists(store + L"\\config.ini"),
+             "Phone storage was not found. Choose a valid phone folder before maintenance.");
+        plain(store);
+        need(!inside(paths().sdk, store) && !inside(info.sdk, store), "Move the Android SDK outside this phone folder before maintenance.");
+        for (const auto &other : list()) {
+            need(!inside(other.sdk, store), "Move the Android SDK outside this phone folder before maintenance.");
+            if (other.id == key)
+                continue;
+            auto otherStore = storeFor(other);
+            need(otherStore.empty() || (!inside(store, otherStore) && !inside(otherStore, store)),
+                 "Another phone shares this storage. Choose separate phone folders before maintenance.");
+        }
+    } catch (const std::exception &e) {
+        error = widen(e.what());
+        if (acquired) {
+            ReleaseMutex(handle);
+            acquired = false;
+        }
+    }
+}
+Maintenance::~Maintenance() {
+    if (launcher) {
+        ReleaseMutex(launcher);
+        CloseHandle(launcher);
+    }
+    if (acquired)
+        ReleaseMutex(handle);
+    if (handle)
+        CloseHandle(handle);
+}
+namespace {
+std::wstring cleanName(std::wstring label) {
+    while (!label.empty() && iswspace(label.front()))
+        label.erase(label.begin());
+    while (!label.empty() && iswspace(label.back()))
+        label.pop_back();
+    need(!label.empty() && label.size() <= 40 && label.find_first_of(L"\r\n\t[]=") == std::wstring::npos &&
+             std::none_of(label.begin(), label.end(), [](wchar_t c) { return c < 32 || c == 127; }),
+         "Use 1–40 characters without line breaks or INI symbols.");
+    return label;
+}
+Paths phonePaths(const Info &info) {
+    if (info.current)
+        return paths();
+    auto file = info.data + L"\\settings.ini";
+    auto home = get(file, L"launcher", L"home");
+    if (home.empty() && info.id.empty())
+        home = envVar(L"USERPROFILE") + L"\\.android";
+    need(!home.empty(), "This phone has no registered Android storage.");
+    Paths p;
+    p.sdk = info.sdk.empty() ? paths().sdk : info.sdk;
+    p.avdHome = home + L"\\avd";
+    p.avdDir = p.avdHome + L"\\Gaming_Phone.avd";
+    p.rootImage = get(file, L"launcher", L"rootimage");
+    p.log = info.data + L"\\emulator.log";
+    return p;
+}
+void put(const std::wstring &file, const wchar_t *section, const wchar_t *key, const std::wstring &value) {
+    plain(file);
+    need(value.find_first_of(L"\r\n") == std::wstring::npos && WritePrivateProfileStringW(section, key, value.c_str(), file.c_str()),
+         "Couldn't save phone storage preferences.");
+}
+std::wstring identifier() {
+    GUID guid{};
+    need(SUCCEEDED(CoCreateGuid(&guid)), "Couldn't create a phone identifier.");
+    wchar_t text[48]{};
+    StringFromGUID2(guid, text, 48);
+    std::wstring key;
+    for (auto c : std::wstring(text))
+        if (iswxdigit(c))
+            key += wchar_t(towlower(c));
+    need(valid(key), "Couldn't create a phone identifier.");
+    return key;
+}
+bool disposable(const std::wstring &relative) {
+    return relative == L"cache.img" || relative == L"cache.img.qcow2" || relative == L"velox-snapshot.ini" || relative == L"snapshots" ||
+           relative.rfind(L"snapshots\\", 0) == 0;
+}
+void switchHome(const Info &info, const std::wstring &home, const std::wstring &rootImage) {
+    auto file = info.data + L"\\settings.ini", fresh = file + L".storage-new";
+    plain(file);
+    plain(fresh);
+    need(CopyFileW(file.c_str(), fresh.c_str(), FALSE), "Couldn't preserve the phone settings for the storage switch.");
+    put(fresh, L"launcher", L"home", home);
+    put(fresh, L"launcher", L"rootimage", rootImage);
+    put(fresh, L"launcher", L"quickboot", L"0");
+    WritePrivateProfileStringW(L"running", nullptr, nullptr, fresh.c_str());
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, fresh.c_str());
+    need(MoveFileExW(fresh.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+         "Couldn't switch phone storage. The original is still available.");
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, file.c_str());
+}
+} // namespace
+bool rename(const std::wstring &key, const std::wstring &label, const Report &report) {
+    try {
+        need(key.empty() || valid(key), "Invalid instance identifier.");
+        Gate gate;
+        need(gate.locked, "Another phone is being prepared. Try again in a moment.");
+        auto name = cleanName(label);
+        auto info = read(key);
+        write(key.empty() ? baseDataFolder() + L"\\identity.ini" : meta(key),
+              L"[instance]\r\nname=" + name + L"\r\nport=" + std::to_wstring(info.port) + L"\r\n");
+        report(i18n::text(L"Phone name updated."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+Storage storage(const std::wstring &key) {
+    Storage out;
+    out.id = key;
+    try {
+        need(key.empty() || valid(key), "Invalid instance identifier.");
+        auto info = read(key);
+        auto p = phonePaths(info);
+        need(!p.avdDir.empty() && fs::path(p.avdDir).is_absolute() && isDir(p.avdDir) && exists(p.avdDir + L"\\config.ini"),
+             "Phone storage was not found. Choose a valid phone folder before maintenance.");
+        out.home = fs::path(p.avdHome).parent_path().wstring();
+        out.previous = get(info.data + L"\\storage.ini", L"previous", L"home");
+        plain(p.avdDir);
+        plain(info.data);
+        auto scan = [&](const std::wstring &dir, bool phone) {
+            if (!isDir(dir))
+                return;
+            size_t count = 0;
+            for (const auto &e : fs::recursive_directory_iterator(dir)) {
+                need(++count <= 200000, "Storage contains too many files to scan safely.");
+                plain(e.path().wstring());
+                if (!e.is_regular_file())
+                    continue;
+                auto n = e.file_size();
+                if (phone) {
+                    out.phone += n;
+                    DWORD hi = 0;
+                    SetLastError(NO_ERROR);
+                    DWORD lo = GetCompressedFileSizeW(e.path().c_str(), &hi);
+                    out.allocated += lo == INVALID_FILE_SIZE && GetLastError() ? n : (uint64_t(hi) << 32) | lo;
+                    if (disposable(fs::relative(e.path(), dir).wstring()))
+                        out.reclaimable += n;
+                } else
+                    out.desktop += n;
+            }
+        };
+        scan(p.avdDir, true);
+        // Keep this count local: other instances are separate phones, not desktop overhead.
+        for (const auto &e : fs::directory_iterator(info.data)) {
+            plain(e.path().wstring());
+            if (e.is_regular_file()) {
+                out.desktop += e.file_size();
+                if (e.path().filename() == L"emulator.log" || e.path().filename() == L"preview.png")
+                    out.reclaimable += e.file_size();
+            } else if (e.is_directory() && (e.path().filename() == L"controls" || e.path().filename() == L"presets"))
+                scan(e.path().wstring(), false);
+        }
+    } catch (const std::exception &e) {
+        out.error = widen(e.what());
+    }
+    return out;
+}
+bool cleanup(const std::wstring &key, const Report &report) {
+    Maintenance lease(key);
+    if (!lease.acquired) {
+        report(lease.error, true);
+        return false;
+    }
+    try {
+        auto info = read(key);
+        auto p = phonePaths(info);
+        std::vector<fs::path> candidates;
+        for (auto name : {L"snapshots", L"cache.img", L"cache.img.qcow2", L"velox-snapshot.ini"})
+            candidates.push_back(fs::path(p.avdDir) / name);
+        candidates.push_back(p.log);
+        candidates.push_back(fs::path(info.data) / L"preview.png");
+        for (const auto &path : candidates)
+            if (fs::exists(path)) {
+                plain(path.wstring());
+                if (fs::is_directory(path))
+                    for (const auto &e : fs::recursive_directory_iterator(path))
+                        plain(e.path().wstring());
+            }
+        for (const auto &path : candidates)
+            if (fs::exists(path))
+                recyclePath(path);
+        report(i18n::text(L"Snapshots, cache and logs moved to the Recycle Bin. Apps and saves are kept."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+bool clone(const std::wstring &key, const std::wstring &label, bool full, const Report &report) {
+    Maintenance lease(key);
+    if (!lease.acquired) {
+        report(lease.error, true);
+        return false;
+    }
+    try {
+        auto labelClean = cleanName(label);
+        auto info = read(key);
+        auto p = phonePaths(info);
+        auto freshKey = identifier(), target = root() + L"\\" + freshKey;
+        plain(target);
+        need(!exists(target), "Instance folder already exists.");
+        createDirs(target + L"\\data");
+        auto home = target + L"\\Android";
+        if (full) {
+            if (!vault::copyPhone(p, home, report))
+                return false;
+        } else {
+            std::wstring error;
+            bool created = setup::createPhoneAt(home, error);
+            need(created, narrow(error).c_str());
+        }
+        auto settings = target + L"\\data\\settings.ini", source = info.data + L"\\settings.ini";
+        write(settings, L"[launcher]\r\nconfigured=1\r\nhome=" + home + L"\r\nsdk=" + p.sdk +
+                            L"\r\nquickboot=0\r\nautostart=0\r\nnumber=\r\nroot=0\r\n");
+        for (auto k :
+             {L"screen", L"hz", L"cpu", L"ram", L"gpu", L"snappy", L"boost", L"frame", L"bootscreen", L"bootstyle", L"cursor", L"brand",
+              L"language", L"gesturenavigation", L"reversebuttons", L"autorotate", L"touches", L"backgroundfps", L"backgroundmute"}) {
+            auto value = get(source, L"launcher", k);
+            if (!value.empty())
+                put(settings, L"launcher", k, value);
+        }
+        if (full && get(source, L"launcher", L"root") == L"1") {
+            need(exists(home + L"\\root\\ramdisk-root.img"), "The Root boot image is missing.");
+            put(settings, L"launcher", L"root", L"1");
+            put(settings, L"launcher", L"rootimage", home + L"\\root\\ramdisk-root.img");
+        }
+        for (auto name : {L"controls", L"presets"}) {
+            auto from = info.data + L"\\" + name, to = target + L"\\data\\" + name;
+            plain(from);
+            if (isDir(from))
+                for (const auto &e : fs::directory_iterator(from)) {
+                    plain(e.path().wstring());
+                    if (e.is_regular_file() && e.path().extension() == L".ini") {
+                        need(e.file_size() <= (1u << 20), "A control or preset file is too large.");
+                        createDirs(to);
+                        need(CopyFileW(e.path().c_str(), (fs::path(to) / e.path().filename()).c_str(), TRUE),
+                             "Couldn't copy controls or presets.");
+                    }
+                }
+        }
+        // Catalog publication is last. Until then, no launcher can open the copy.
+        Gate gate;
+        need(gate.locked, "Another phone is being prepared. Try again in a moment.");
+        auto phones = list();
+        need(phones.size() < 9, "This installation supports the main phone and eight additional phones.");
+        std::set<int> used;
+        for (auto &i : phones)
+            used.insert(i.port);
+        int chosen = 0;
+        for (int n = 5582; n <= 5682; n += 2)
+            if (!used.count(n) && available(n)) {
+                chosen = n;
+                break;
+            }
+        need(chosen != 0, "No free Android emulator connection ports are available.");
+        write(target + L"\\instance.ini", L"[instance]\r\nname=" + labelClean + L"\r\nport=" + std::to_wstring(chosen) + L"\r\n");
+        report(i18n::text(L"Phone copy ready. The source is unchanged."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+bool relocate(const std::wstring &key, const std::wstring &parent, const Report &report) {
+    Maintenance lease(key);
+    if (!lease.acquired) {
+        report(lease.error, true);
+        return false;
+    }
+    try {
+        auto info = read(key);
+        auto p = phonePaths(info);
+        plain(parent);
+        need(isDir(parent) && parent.size() > 2 && parent[1] == L':' && GetDriveTypeW((parent.substr(0, 3)).c_str()) == DRIVE_FIXED &&
+                 parent.find_first_of(L"\r\n") == std::wstring::npos,
+             "Choose a folder on a local fixed drive.");
+        auto target = parent + L"\\Velox Phone " + identifier();
+        for (auto &other : list()) {
+            auto otherPaths = phonePaths(other);
+            need(!inside(target, otherPaths.avdDir) && !inside(target, other.sdk),
+                 "Choose storage outside phone data and the shared Android SDK.");
+        }
+        if (!vault::copyPhone(p, target, report))
+            return false;
+        auto previousHome = fs::path(p.avdHome).parent_path().wstring();
+        write(info.data + L"\\storage.ini",
+              L"[previous]\r\nhome=" + previousHome + L"\r\nrootimage=" + p.rootImage + L"\r\nnewhome=" + target + L"\r\n");
+        switchHome(info, target, exists(target + L"\\root\\ramdisk-root.img") ? target + L"\\root\\ramdisk-root.img" : L"");
+        report(i18n::text(L"Storage moved and verified. The original stays available through Undo move."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
+bool undoRelocation(const std::wstring &key, const Report &report) {
+    Maintenance lease(key);
+    if (!lease.acquired) {
+        report(lease.error, true);
+        return false;
+    }
+    try {
+        auto info = read(key);
+        auto file = info.data + L"\\storage.ini";
+        auto home = get(file, L"previous", L"home"), rootImage = get(file, L"previous", L"rootimage");
+        plain(home);
+        need(isDir(home + L"\\avd\\Gaming_Phone.avd"), "The previous phone storage is missing.");
+        auto active = phonePaths(info);
+        auto expected = get(file, L"previous", L"newhome");
+        need(!expected.empty() && inside(active.avdDir, expected), "Phone storage has changed since the move. Undo was not applied.");
+        switchHome(info, home, rootImage);
+        report(i18n::text(L"Previous storage selected. Both copies remain on disk."), false);
+        return true;
+    } catch (const std::exception &e) {
+        report(widen(e.what()), true);
+        return false;
+    }
+}
 bool create(const std::wstring &sdk, const Report &report) {
     try {
         Gate gate;
@@ -501,7 +891,8 @@ bool recycle(const std::wstring &key, const Report &report) {
         need(exists(meta(key)) && fs::file_size(meta(key)) < 65536, "This phone is no longer available.");
         auto info = read(key);
         need(!info.active && !info.starting && !info.window, "Stop this phone and close its controls before removing it.");
-        need(!inside(paths().sdk, target) && !inside(info.sdk, target), "This phone contains an Android SDK. Move the SDK before removing it.");
+        need(!inside(paths().sdk, target) && !inside(info.sdk, target),
+             "This phone contains an Android SDK. Move the SDK before removing it.");
         for (const auto &other : list()) {
             need(!inside(other.sdk, target), "This phone contains an Android SDK. Move the SDK before removing it.");
             if (other.id != key)
@@ -513,28 +904,7 @@ bool recycle(const std::wstring &key, const Report &report) {
             need(attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
                  "This phone contains a link or cloud placeholder. Its files were not removed.");
         }
-        struct Apartment {
-            HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-            ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
-        } apartment;
-        need(SUCCEEDED(apartment.result), "Windows file operations are unavailable. The phone was not removed.");
-        IFileOperation *rawOperation = nullptr;
-        need(SUCCEEDED(CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&rawOperation))),
-             "Windows file operations are unavailable. The phone was not removed.");
-        std::unique_ptr<IFileOperation, ComRelease> operation(rawOperation);
-        IShellItem *rawItem = nullptr;
-        need(SUCCEEDED(SHCreateItemFromParsingName(target.c_str(), nullptr, IID_PPV_ARGS(&rawItem))), "Couldn't open the phone folder.");
-        std::unique_ptr<IShellItem, ComRelease> item(rawItem);
-        std::unique_ptr<RecycleGuard, ComRelease> sink(new RecycleGuard);
-        auto flags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE |
-                     FOFX_ADDUNDORECORD;
-        need(SUCCEEDED(operation->SetOperationFlags(flags)) && SUCCEEDED(operation->DeleteItem(item.get(), sink.get())),
-             "Windows couldn't prepare the Recycle Bin operation. The phone was not removed.");
-        HRESULT result = operation->PerformOperations();
-        BOOL aborted = TRUE;
-        operation->GetAnyOperationsAborted(&aborted);
-        need(SUCCEEDED(result) && !aborted && !sink->rejected && sink->recycled && !exists(target.wstring()),
-             "Windows couldn't recycle this phone. Close files in use and check the Recycle Bin settings; permanent deletion was not requested.");
+        recyclePath(target);
         report(info.name + i18n::text(L" moved to the Recycle Bin. Restore its folder there to undo removal."), false);
         return true;
     } catch (const std::exception &e) {
@@ -613,13 +983,15 @@ void failure(const std::wstring &message) {
 }
 bool budget(const Settings &s, std::wstring &error) {
     try {
-        int cpu = coresFor(s), ram = memoryFor(s);
+        // The pinned Play image raises 2-GB requests to 2560 MB. Reserve whole
+        // gigabytes conservatively without changing the user's requested target.
+        int cpu = coresFor(s), ram = std::max(3, memoryFor(s));
         for (auto &i : list())
             if (!i.current && i.active) {
                 cpu += i.cores;
                 ram += i.memory;
             }
-        int limit = std::max(memoryFor(s), host().ramGB - std::max(3, host().ramGB / 4));
+        int limit = std::max(std::max(3, memoryFor(s)), host().ramGB - std::max(3, host().ramGB / 4));
         need(cpu <= host().threads, "The running phones exceed this PC's CPU budget. Lower a phone's core allocation first.");
         need(ram <= limit, "The running phones exceed the safe RAM budget. Lower a phone's memory allocation first.");
         return true;
@@ -632,6 +1004,13 @@ bool reserve(const Settings &s, std::wstring &error) {
     try {
         Gate gate;
         need(gate.locked, "Another phone is starting. Try again in a moment.");
+        auto maintenance = CreateMutexW(nullptr, FALSE, (mutexFor(selected) + L"-maintenance").c_str());
+        need(maintenance != nullptr, "Couldn't check phone maintenance ownership.");
+        auto wait = WaitForSingleObject(maintenance, 0);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED)
+            ReleaseMutex(maintenance);
+        CloseHandle(maintenance);
+        need(wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED, "This phone is being copied or maintained. Try again when it finishes.");
         if (!budget(s, error))
             return false;
         if (!selected.empty()) {
@@ -655,7 +1034,7 @@ bool reserve(const Settings &s, std::wstring &error) {
         }
         need(available(port()), "This phone's connection ports are already in use. Close its previous emulator before starting it again.");
         std::lock_guard<std::mutex> lock(runtimeLock);
-        runtime = {GetCurrentProcessId(), 0, born(GetCurrentProcessId()), 0, coresFor(s), memoryFor(s), port(), paths().sdk};
+        runtime = {GetCurrentProcessId(), 0, born(GetCurrentProcessId()), 0, coresFor(s), std::max(3, memoryFor(s)), port(), paths().sdk};
         saveRuntime();
         failure(L"");
         return true;

@@ -43,7 +43,7 @@ public class WallpaperProvider extends ContentProvider {
     @Override
     public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
         enforce();
-        if (!mode.contains("w")) throw new FileNotFoundException("write only");
+        if (mode == null || !mode.contains("w")) throw new FileNotFoundException("write only");
         return ParcelFileDescriptor.open(image(), ParcelFileDescriptor.MODE_WRITE_ONLY
                 | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE);
     }

@@ -5,6 +5,8 @@
 #include <wincrypt.h>
 #include <wintrust.h>
 #include <shlobj.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 #include <tlhelp32.h>
 
 #include <cmath>
@@ -504,6 +506,10 @@ void loadFrom(Settings &s, const wchar_t *sec) {
     s.cursor = std::clamp(readIntIn(sec, L"cursor", 0), 0, static_cast<int>(art::cursorNames().size()) - 1);
     s.number = readStr(sec, L"number");
     s.language = readIntIn(sec, L"language", 0) == 1 ? 1 : 0;
+    s.backgroundRate = readIntIn(sec, L"backgroundfps", 0);
+    if (s.backgroundRate != 15 && s.backgroundRate != 30 && s.backgroundRate != 60)
+        s.backgroundRate = 0;
+    s.backgroundMute = rb(L"backgroundmute", false);
     if (!validPhoneNumber(s.number))
         s.number.clear();
 }
@@ -533,6 +539,8 @@ void saveTo(const Settings &s, const wchar_t *sec) {
     writeStr(sec, L"cursor", std::to_wstring(s.cursor));
     writeStr(sec, L"number", s.number);
     writeStr(sec, L"language", std::to_wstring(s.language));
+    writeStr(sec, L"backgroundfps", std::to_wstring(s.backgroundRate));
+    writeStr(sec, L"backgroundmute", b(s.backgroundMute));
 }
 
 } // namespace
@@ -555,6 +563,7 @@ void loadSettings(Settings &s, bool &firstRun) {
 
 void saveSettings(const Settings &s) {
     saveTo(s, L"launcher");
+    backgroundPolicy(s.backgroundRate, s.backgroundMute, s.rate);
 }
 
 std::wstring gpuMode(const Settings &s) {
@@ -1289,6 +1298,7 @@ void applyLive(const Settings &s) {
     cmd += L"settings put system min_refresh_rate " + std::to_wstring(s.rate) + L"; ";
     cmd += L"settings put system show_touches " + std::wstring(s.showTouches ? L"1" : L"0") + L"\"";
     adb(cmd, 15000);
+    backgroundPolicy(s.backgroundRate, s.backgroundMute, s.rate);
 }
 
 namespace {
@@ -1329,7 +1339,162 @@ bool prepareAndroidConfig(std::wstring &error) {
 }
 } // namespace
 
+namespace {
+std::atomic<bool> cancelStart{false};
+std::atomic<int> backgroundFps{0};
+std::atomic<int> foregroundFps{120};
+std::atomic<bool> muteBackground{false};
+std::atomic<unsigned> backgroundGeneration{1};
+unsigned limitedGeneration = 0;
+std::mutex backgroundMutex;
+int limitedRate = 0;
+DWORD limitedPid = 0;
+std::map<std::wstring, BOOL> mutedSessions;
+} // namespace
+void cancelStartup() {
+    if (state == State::Starting)
+        cancelStart = true;
+}
+void backgroundPolicy(int rate, bool mute, int foregroundRate) {
+    backgroundFps = rate == 15 || rate == 30 || rate == 60 ? rate : 0;
+    muteBackground = mute;
+    if (foregroundRate > 0)
+        foregroundFps = foregroundRate;
+    ++backgroundGeneration;
+}
+void backgroundTick(HWND launcher, bool restore) {
+    std::lock_guard<std::mutex> guard(backgroundMutex);
+    if (state == State::Stopped && mutedSessions.empty()) {
+        limitedRate = 0;
+        limitedPid = 0;
+        return;
+    }
+    auto pid = emulatorPid();
+    struct Process {
+        HANDLE handle = nullptr;
+        ~Process() {
+            if (handle)
+                CloseHandle(handle);
+        }
+    } process{pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr};
+    DWORD focus = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &focus);
+    bool inactive = !restore && state == State::Running && pid && focus != pid && focus != GetCurrentProcessId();
+    int normalRate = foregroundFps.load();
+    int wanted = inactive && backgroundFps ? std::min(backgroundFps.load(), normalRate) : 0;
+    auto generation = backgroundGeneration.load();
+    if (state == State::Running && (wanted || limitedRate) &&
+        (limitedRate != wanted || limitedPid != pid || generation != limitedGeneration)) {
+        int rate = wanted ? wanted : normalRate;
+        adb(L"shell \"settings put system peak_refresh_rate " + std::to_wstring(rate) + L"; settings put system min_refresh_rate " +
+                std::to_wstring(rate) + L"\"",
+            3000);
+        limitedRate = wanted;
+        limitedPid = pid;
+        limitedGeneration = generation;
+    }
+    if (state == State::Stopped) {
+        limitedRate = 0;
+        limitedPid = 0;
+    }
+    bool mute = inactive && muteBackground;
+    if (!mute && mutedSessions.empty())
+        return;
+    // Session-level muting preserves Android's volume and every other Windows app.
+    HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator *devices = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IMMDeviceEnumerator),
+                                   reinterpret_cast<void **>(&devices)))) {
+        IMMDeviceCollection *collection = nullptr;
+        if (SUCCEEDED(devices->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection))) {
+            UINT count = 0;
+            collection->GetCount(&count);
+            for (UINT d = 0; d < count; ++d) {
+                IMMDevice *device = nullptr;
+                IAudioSessionManager2 *manager = nullptr;
+                IAudioSessionEnumerator *sessions = nullptr;
+                if (SUCCEEDED(collection->Item(d, &device)) &&
+                    SUCCEEDED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER, nullptr,
+                                               reinterpret_cast<void **>(&manager))) &&
+                    SUCCEEDED(manager->GetSessionEnumerator(&sessions))) {
+                    int n = 0;
+                    sessions->GetCount(&n);
+                    for (int i = 0; i < n; ++i) {
+                        IAudioSessionControl *control = nullptr;
+                        IAudioSessionControl2 *identity = nullptr;
+                        ISimpleAudioVolume *volume = nullptr;
+                        if (SUCCEEDED(sessions->GetSession(i, &control)) &&
+                            SUCCEEDED(control->QueryInterface(__uuidof(IAudioSessionControl2), reinterpret_cast<void **>(&identity))) &&
+                            SUCCEEDED(control->QueryInterface(__uuidof(ISimpleAudioVolume), reinterpret_cast<void **>(&volume)))) {
+                            DWORD owner = 0;
+                            LPWSTR raw = nullptr;
+                            identity->GetProcessId(&owner);
+                            if (SUCCEEDED(identity->GetSessionInstanceIdentifier(&raw)) && raw) {
+                                std::wstring key(raw);
+                                auto saved = mutedSessions.find(key);
+                                if (mute && owner == pid && process.handle && WaitForSingleObject(process.handle, 0) == WAIT_TIMEOUT) {
+                                    if (saved == mutedSessions.end()) {
+                                        BOOL before = FALSE;
+                                        if (SUCCEEDED(volume->GetMute(&before)) && SUCCEEDED(volume->SetMute(TRUE, nullptr)))
+                                            mutedSessions[key] = before;
+                                    }
+                                } else if (saved != mutedSessions.end() && SUCCEEDED(volume->SetMute(saved->second, nullptr)))
+                                    mutedSessions.erase(saved);
+                                CoTaskMemFree(raw);
+                            }
+                        }
+                        if (volume)
+                            volume->Release();
+                        if (identity)
+                            identity->Release();
+                        if (control)
+                            control->Release();
+                    }
+                }
+                if (sessions)
+                    sessions->Release();
+                if (manager)
+                    manager->Release();
+                if (device)
+                    device->Release();
+            }
+            collection->Release();
+        }
+        devices->Release();
+    }
+    if (SUCCEEDED(apartment))
+        CoUninitialize();
+    (void)launcher;
+}
+
+bool repairStartup(const Settings &settings, const Report &report) {
+    instances::Maintenance lease(instances::id());
+    if (!lease.acquired) {
+        report(lease.error, true);
+        return false;
+    }
+    if (!goodSdk(paths().sdk)) {
+        report(i18n::text(L"Android tools could not be verified. Choose a Google-signed SDK on the Phone page."), true);
+        return false;
+    }
+    if (!exists(paths().avdDir + L"\\userdata-qemu.img") && !exists(paths().avdDir + L"\\userdata-qemu.img.qcow2")) {
+        report(i18n::text(L"Phone disks are missing. Restore a verified Vault backup before starting."), true);
+        return false;
+    }
+    if (!writeConfig(settings)) {
+        report(i18n::text(L"Couldn't save the phone's settings (config.ini)."), true);
+        return false;
+    }
+    distrustSnapshot();
+    instances::failure(L"");
+    report(i18n::text(L"Startup repaired. The next start uses a full boot; apps and saves are kept."), false);
+    return true;
+}
 void start(const Settings &s, const Report &report) {
+    struct ResetCancel {
+        ~ResetCancel() { cancelStart = false; }
+    } resetCancel;
+    backgroundPolicy(s.backgroundRate, s.backgroundMute, s.rate);
     setAutoRotation(s.autoRotate);
     setGestureNavigation(s.gestureNavigation, s.reverseButtons);
     g_navigationRestart = false;
@@ -1350,6 +1515,23 @@ void start(const Settings &s, const Report &report) {
         report(msg, true);
         instances::failure(msg);
     };
+    auto cancelled = [&] {
+        if (!cancelStart)
+            return false;
+        if (g_launchedPid && instances::ownsWrapper(g_launchedPid))
+            hardKill();
+        distrustSnapshot();
+        boot.active = false;
+        state = emulatorRunning() ? State::Running : State::Stopped;
+        if (state == State::Stopped) {
+            forgetRunning();
+            instances::stopped();
+        }
+        report(i18n::text(L"Startup cancelled. Your phone data is kept."), false);
+        return true;
+    };
+    if (cancelled())
+        return;
     if (!validPhoneNumber(s.number))
         return fail(i18n::text(L"The phone number must contain digits and an optional leading + (up to 20 characters)."));
     std::wstring configurationError;
@@ -1371,6 +1553,8 @@ void start(const Settings &s, const Report &report) {
     defaultEmulatorTheme();
 
     for (int attempt = 0; attempt < 2; attempt++) {
+        if (cancelled())
+            return;
         std::wstring allocationError;
         if (!instances::reserve(s, allocationError))
             return fail(allocationError);
@@ -1425,6 +1609,8 @@ void start(const Settings &s, const Report &report) {
         bool online = false, booted = false, stuck = false;
         for (int tick = 0; !booted; tick++) {
             Sleep(250);
+            if (cancelled())
+                return;
             float el = (GetTickCount64() - t0) / 1000.f;
             WIN32_FILE_ATTRIBUTE_DATA logSize{};
             if (GetFileAttributesExW(g_paths.log.c_str(), GetFileExInfoStandard, &logSize) &&
@@ -1452,8 +1638,10 @@ void start(const Settings &s, const Report &report) {
                 stuck = true;
                 break;
             }
-            if (!resume && el > 240.f)
-                return fail(i18n::text(L"The phone is taking unusually long to start. Check emulator.log."));
+            if (!resume && el > 240.f) {
+                hardKill();
+                return fail(i18n::text(L"The phone took too long to start and was stopped. Use Startup repair in Recovery."));
+            }
         }
         if (stuck) {
             // A snapshot that doesn't wake up: throw it away and boot normally.
@@ -1464,6 +1652,8 @@ void start(const Settings &s, const Report &report) {
             boot.set(0.02f, i18n::text(L"Starting Android"));
             continue;
         }
+        if (cancelled())
+            return;
         float took = (GetTickCount64() - t0) / 1000.f;
         boot.set(0.97f, i18n::text(L"Applying your settings"));
         const int requestedCpu = coresFor(s);
@@ -1471,6 +1661,8 @@ void start(const Settings &s, const Report &report) {
         observeCpuCapability(requestedCpu, presentCpu);
         rememberRunning(s);
         applyLive(s);
+        if (cancelled())
+            return;
         if (!resume)
             writeStr(L"state", L"lastboot", std::to_wstring(static_cast<int>(took + 0.5f)));
         state = State::Running;

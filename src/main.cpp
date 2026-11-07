@@ -73,7 +73,11 @@ struct App {
     bool closeAfterVault = false;
     bool exitAfterStop = false;
     std::vector<instances::Info> phones;
-    int instancePage = 0;
+    int instancePage = 0, instanceTab = 0, recoveryTab = 0, controlsTab = 0;
+    std::optional<std::wstring> managedPhone;
+    instances::Storage storage;
+    bool closeAfterStartup = false, performanceBackground = false, storageDirty = false, backgroundReady = false;
+    std::atomic<bool> backgroundClosing{false};
     std::vector<vault::Entry> backups;
     int backupPage = 0;
     std::wstring selectedBackup;
@@ -264,7 +268,7 @@ void gradientFill(gp::Graphics &gr, const gp::RectF &r, float rad) {
 
 int addHit(const gp::RectF &r, bool enabled, std::function<void()> act) {
     int id = g.nextId++;
-    g.hits.push_back({r, id, enabled && (!vault::progress.running || g.vaultAllow), std::move(act)});
+    g.hits.push_back({r, id, enabled && !g.backgroundClosing && (!vault::progress.running || g.vaultAllow), std::move(act)});
     return id;
 }
 
@@ -378,7 +382,16 @@ void card(gp::Graphics &gr, const gp::RectF &r) {
 
 void restartToApply();
 
+void cancelStartingPhone() {
+    g.pendingSettings.reset();
+    g.pendingGame.clear();
+    g.activeGame.clear();
+    g.pendingEditor = false;
+    phone::cancelStartup();
+}
 void startPhone() {
+    if (g.backgroundClosing || g.closeAfterStartup)
+        return;
     if (!installed()) {
         auto message = i18n::text(L"Open this phone's controls to finish Android setup or select its SDK.");
         instances::failure(message);
@@ -453,7 +466,11 @@ void tool(std::function<void()> fn) {
         return;
     }
     std::thread([fn] {
-        fn();
+        try {
+            fn();
+        } catch (const std::exception &error) {
+            say(widen(error.what()), true);
+        }
         g.busy = false;
         refresh();
     }).detach();
@@ -673,8 +690,8 @@ std::wstring niceDate(const std::wstring &iso) {
     if (m < 1 || m > 12)
         return iso;
     if (i18n::language() == 1) {
-        static const wchar_t *germanMonths[] = {L"Jan.", L"Feb.", L"März", L"Apr.", L"Mai", L"Juni",
-                                               L"Juli", L"Aug.", L"Sept.", L"Okt.", L"Nov.", L"Dez."};
+        static const wchar_t *germanMonths[] = {L"Jan.", L"Feb.", L"März",  L"Apr.", L"Mai",  L"Juni",
+                                                L"Juli", L"Aug.", L"Sept.", L"Okt.", L"Nov.", L"Dez."};
         return std::to_wstring(d) + L". " + germanMonths[m - 1] + L" " + iso.substr(0, 4);
     }
     return std::wstring(months[m - 1]) + L" " + std::to_wstring(d) + L", " + iso.substr(0, 4);
@@ -1105,6 +1122,7 @@ void refreshVault() {
 void reloadRecovery() {
     loadSettings(g.set, g.firstRun);
     i18n::language(g.set.language);
+    phone::backgroundPolicy(g.set.backgroundRate, g.set.backgroundMute, g.set.rate);
     findPaths();
     presets::invalidate();
     g.activeGame.clear();
@@ -1121,9 +1139,16 @@ void reloadRecovery() {
 void showPreset(const experience::AppInfo &app) {
     studio::game(g.hwnd, app, g.set);
 }
+void drawRecoveryTools(gp::Graphics &gr);
 void drawRecovery(gp::Graphics &gr) {
+    if (g.recoveryTab) {
+        drawRecoveryTools(gr);
+        return;
+    }
     const float x = X0(), w = CW();
     pageHeader(gr, i18n::text(L"Velox Vault"), i18n::text(L"Private recovery points. A way back that keeps your old phone intact."));
+    button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Schedule & repair"), Btn::Secondary, !g.busy,
+           [] { g.recoveryTab = 1; });
     card(gr, gp::RectF(x, dp(96), w, dp(98)));
     text(gr, L"\xE8F1", gp::RectF(x + dp(14), dp(103), dp(42), dp(48)), *g.fIconBig, C_ACCENT, gp::StringAlignmentCenter);
     text(gr,
@@ -1245,15 +1270,294 @@ void drawRecovery(gp::Graphics &gr) {
     button(gr, gp::RectF(x + 2 * (bw + dp(8)), dp(571), bw, dp(32)), i18n::text(L"Refresh"), Btn::Ghost, !g.busy, refreshVault);
 }
 
+void drawRecoveryTools(gp::Graphics &gr) {
+    const float x = X0(), w = CW();
+    pageHeader(gr, i18n::text(L"Velox Care"), i18n::text(L"Quiet protection. Clear recovery. Your data stays yours."));
+    button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Recovery points"), Btn::Secondary, !g.busy, [] {
+        g.recoveryTab = 0;
+        refreshVault();
+    });
+    segments(
+        gr, gp::RectF(x, dp(96), w, dp(36)), {i18n::text(L"Backup schedule"), i18n::text(L"Startup repair")}, g.recoveryTab - 1,
+        [](int) { return !g.busy; }, [](int n) { g.recoveryTab = n + 1; });
+    if (g.recoveryTab == 1) {
+        auto s = vault::schedule();
+        card(gr, gp::RectF(x, dp(151), w, dp(96)));
+        text(gr, i18n::text(L"Back up when you're done playing"), gp::RectF(x + dp(18), dp(162), w - dp(36), dp(27)), *g.fBig, C_TEXT);
+        text(gr,
+             i18n::text(L"Runs while these controls are open and this phone is stopped. Due backups wait for you to finish; games are "
+                        L"never stopped automatically."),
+             gp::RectF(x + dp(18), dp(195), w - dp(36), dp(44)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        label(gr, i18n::text(L"FREQUENCY"), x, dp(263), w);
+        segments(
+            gr, gp::RectF(x, dp(286), w, dp(36)), {i18n::text(L"Off"), i18n::text(L"Daily"), i18n::text(L"Weekly")},
+            s.days == 7   ? 2
+            : s.days == 1 ? 1
+                          : 0,
+            [](int) { return !g.busy; },
+            [s](int n) mutable {
+                s.days = n == 2 ? 7 : n;
+                if (!vault::schedule(s))
+                    say(i18n::text(L"Couldn't save backup schedule."), true);
+            });
+        auto numericChoices = [&](float y, std::vector<int> values, int selected, std::function<void(int)> choose) {
+            if (std::find(values.begin(), values.end(), selected) == values.end())
+                values.push_back(selected);
+            std::sort(values.begin(), values.end());
+            std::vector<std::wstring> names;
+            for (int n : values)
+                names.push_back(std::to_wstring(n));
+            int index = int(std::find(values.begin(), values.end(), selected) - values.begin());
+            segments(
+                gr, gp::RectF(x, dp(y), w, dp(36)), names, index, [](int) { return !g.busy; },
+                [values, choose](int n) { choose(values[n]); });
+        };
+        label(gr, i18n::text(L"MAXIMUM SCHEDULED RECOVERY POINTS"), x, dp(340), w);
+        numericChoices(363, {1, 3, 5, 10, 20}, s.keep, [s](int n) mutable {
+            s.keep = n;
+            vault::schedule(s);
+        });
+        label(gr, i18n::text(L"SCHEDULED BACKUP BUDGET (GB)"), x, dp(417), w);
+        numericChoices(440, {10, 25, 50, 100, 250, 500}, s.limitGB, [s](int n) mutable {
+            s.limitGB = n;
+            vault::schedule(s);
+        });
+        text(gr,
+             i18n::text(L"At either limit, scheduling pauses. Move old scheduled backups out of the vault to make room. Manual backups are "
+                        L"kept. No recovery point is deleted automatically."),
+             gp::RectF(x, dp(491), w, dp(61)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        text(gr,
+             s.status.empty() ? (s.days ? i18n::text(L"Ready · due backups run the next time this phone is off.")
+                                        : i18n::text(L"Automatic backups are off."))
+                              : i18n::tr(s.status),
+             gp::RectF(x, dp(563), w - (s.paused ? dp(148) : 0), dp(48)), *g.fSmall, C_ACCENT, gp::StringAlignmentNear,
+             gp::StringAlignmentNear, true);
+        if (s.paused && !vault::progress.running)
+            button(gr, gp::RectF(x + w - dp(140), dp(563), dp(140), dp(34)), i18n::text(L"Resume schedule"), Btn::Secondary,
+                   !g.busy && s.days, [s] { vault::schedule(s); });
+    } else {
+        card(gr, gp::RectF(x, dp(151), w, dp(151)));
+        text(gr, i18n::text(L"A clean start, with your data kept"), gp::RectF(x + dp(18), dp(166), w - dp(36), dp(30)), *g.fH2, C_TEXT);
+        text(gr,
+             i18n::text(L"Velox checks Google's tool signatures, rebuilds the phone's device configuration and bypasses stale quick-boot "
+                        L"state. It keeps installed apps, accounts, saves and your selected performance settings."),
+             gp::RectF(x + dp(18), dp(207), w - dp(36), dp(77)), *g.fText, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        button(gr, gp::RectF(x, dp(320), w, dp(40)), i18n::text(L"Repair next startup"), Btn::Primary, idle() && !running() && !g.busy, [] {
+            auto s = g.set;
+            tool([s] { phone::repairStartup(s, reporter()); });
+        });
+        card(gr, gp::RectF(x, dp(378), w, dp(112)));
+        text(gr, host().hypervisor ? i18n::text(L"Windows virtualization is ready") : i18n::text(L"Windows virtualization needs attention"),
+             gp::RectF(x + dp(18), dp(390), w - dp(36), dp(27)), *g.fBold, host().hypervisor ? C_GOOD : C_WARN);
+        text(gr,
+             i18n::text(L"If Android tools are missing, choose the SDK on the Phone page. If disks are missing, restore a verified Vault "
+                        L"backup. Repair never wipes phone data."),
+             gp::RectF(x + dp(18), dp(428), w - dp(36), dp(53)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        float half = (w - dp(12)) / 2;
+        button(gr, gp::RectF(x, dp(508), half, dp(36)), i18n::text(L"Review diagnostics"), Btn::Secondary, !g.busy,
+               [] { showText(i18n::text(L"Velox diagnostics · review before sharing"), vault::diagnostics()); });
+        button(gr, gp::RectF(x + half + dp(12), dp(508), half, dp(36)), i18n::text(L"Android setup"), Btn::Secondary, !g.busy,
+               [] { g.page = PHONE; });
+        text(gr, i18n::text(L"You can cancel startup from the main button at any time. Only this phone's owned emulator is stopped."),
+             gp::RectF(x, dp(563), w, dp(47)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    }
+    if (vault::progress.running) {
+        g.vaultAllow = true;
+        button(gr, gp::RectF(x + w - dp(100), dp(563), dp(100), dp(34)), i18n::text(L"Cancel"), Btn::Secondary, true,
+               [] { vault::progress.cancel = true; });
+        g.vaultAllow = false;
+    }
+}
 void refreshInstances() {
     g.phones = instances::list();
+    if (g.managedPhone && std::none_of(g.phones.begin(), g.phones.end(), [](const auto &p) { return p.id == *g.managedPhone; }))
+        g.managedPhone.reset();
     if (g.instancePage * 3 >= int(g.phones.size()))
         g.instancePage = std::max(0, (int(g.phones.size()) + 2) / 3 - 1);
 }
 
+void scanStorage(const instances::Info &info) {
+    g.storage = {};
+    g.storage.error = i18n::text(L"Scanning storage…");
+    tool([info] {
+        auto result = std::make_unique<instances::Storage>(instances::storage(info.id));
+        if (PostMessageW(g.hwnd, WM_APP + 57, 0, reinterpret_cast<LPARAM>(result.get())))
+            result.release();
+    });
+}
+std::wstring spaceText(uint64_t bytes) {
+    wchar_t text[64]{};
+    if (bytes >= (1ull << 30))
+        swprintf(text, 64, L"%.1f GB", double(bytes) / (1ull << 30));
+    else
+        swprintf(text, 64, L"%.0f MB", double(bytes) / (1ull << 20));
+    return text;
+}
+void instanceUpdated(const instances::Info &info) {
+    PostMessageW(g.hwnd, WM_APP + 56, info.current ? 1 : 0, 0);
+}
+void drawManagedPhone(gp::Graphics &gr, const instances::Info &info) {
+    const float x = X0(), w = CW(), half = (w - dp(12)) / 2;
+    text(gr, info.name, gp::RectF(x, dp(24), w - dp(145), dp(30)), *g.fTitle, C_TEXT, gp::StringAlignmentNear, gp::StringAlignmentCenter,
+         false, true);
+    text(gr, i18n::text(L"Your phone. Your setup. Room to grow."), gp::RectF(x, dp(56), w, dp(20)), *g.fText, C_DIM);
+    button(gr, gp::RectF(x + w - dp(130), dp(29), dp(130), dp(34)), i18n::text(L"All phones"), Btn::Secondary, !g.busy,
+           [] { g.managedPhone.reset(); });
+    segments(
+        gr, gp::RectF(x, dp(96), w, dp(36)), {i18n::text(L"Identity & copies"), i18n::text(L"Storage")}, g.instanceTab,
+        [](int) { return !g.busy; },
+        [info](int i) {
+            g.instanceTab = i;
+            if (i == 1)
+                scanStorage(info);
+        });
+    bool cold = !info.active && !info.starting && (info.current || !info.window) && !g.busy;
+    if (g.instanceTab == 0) {
+        card(gr, gp::RectF(x, dp(151), w, dp(96)));
+        art::logo(gr, x + dp(18), dp(171), dp(48));
+        text(gr, info.name, gp::RectF(x + dp(82), dp(164), w - dp(250), dp(28)), *g.fH2, C_TEXT);
+        text(gr, info.id.empty() ? i18n::text(L"Main phone") : i18n::text(L"Independent Android phone"),
+             gp::RectF(x + dp(82), dp(200), w - dp(110), dp(23)), *g.fSmall, C_DIM);
+        button(gr, gp::RectF(x + w - dp(145), dp(174), dp(126), dp(34)), i18n::text(L"Rename"), Btn::Secondary, !g.busy, [info] {
+            studio::input(g.hwnd, i18n::text(L"Name your phone"),
+                          i18n::text(L"A name that makes this phone easy to find. Its apps and storage keep their identity."), info.name,
+                          i18n::text(L"Save name"), [info](const std::wstring &name) {
+                              if (instances::rename(info.id, name, reporter())) {
+                                  refreshInstances();
+                                  if (info.current)
+                                      SetWindowTextW(g.hwnd, (L"Velox · " + name).c_str());
+                              }
+                          });
+        });
+        for (int full = 0; full < 2; ++full) {
+            float cx = x + full * (half + dp(12));
+            card(gr, gp::RectF(cx, dp(265), half, dp(225)));
+            text(gr, full ? L"\xE8A5" : L"\xE710", gp::RectF(cx + dp(18), dp(281), dp(36), dp(35)), *g.fIconBig, C_ACCENT);
+            text(gr, full ? i18n::text(L"Full cold clone") : i18n::text(L"Fresh template"),
+                 gp::RectF(cx + dp(18), dp(327), half - dp(36), dp(28)), *g.fBig, C_TEXT);
+            text(gr,
+                 full ? i18n::text(L"A verified copy of apps, accounts, saves, settings and layouts. Keep it private. Some apps may ask "
+                                   L"you to sign in again.")
+                      : i18n::text(L"New Android storage with this phone's settings, keyboard/mouse layouts, controller setup and game "
+                                   L"presets. Ready for a different account."),
+                 gp::RectF(cx + dp(18), dp(361), half - dp(36), dp(78)), *g.fText, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear,
+                 true);
+            button(
+                gr, gp::RectF(cx + dp(18), dp(444), half - dp(36), dp(32)),
+                full ? i18n::text(L"Clone phone") : i18n::text(L"Create from template"), full ? Btn::Secondary : Btn::Primary,
+                cold && g.phones.size() < 9, [info, full] {
+                    studio::input(
+                        g.hwnd, full ? i18n::text(L"Clone phone") : i18n::text(L"Create from template"),
+                        full ? i18n::text(L"The clone contains private apps, accounts and saves. The source stays intact. Both phones need "
+                                          L"their own available CPU and memory budget.")
+                             : i18n::text(
+                                   L"The new phone uses fresh Android data. Your settings, game presets and saved controls carry across."),
+                        info.name.substr(0, 32) + i18n::text(L" copy"), i18n::text(L"Create phone"),
+                        [info, full](const std::wstring &name) {
+                            tool([info, full, name] {
+                                instances::clone(info.id, name, full, reporter());
+                                instanceUpdated(info);
+                            });
+                        });
+                });
+        }
+        text(gr,
+             cold ? i18n::text(L"Copies start with a full boot and automatic startup off.")
+                  : i18n::text(L"Stop the source phone and close its other controls before copying."),
+             gp::RectF(x, dp(511), w, dp(50)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    } else {
+        auto s = g.storage;
+        card(gr, gp::RectF(x, dp(151), w, dp(110)));
+        text(gr, s.error.empty() ? spaceText(s.allocated) + i18n::text(L" on disk") : s.error,
+             gp::RectF(x + dp(18), dp(164), w - dp(155), dp(30)), *g.fH2, s.error.empty() ? C_TEXT : C_WARN);
+        text(gr, i18n::text(L"Phone files: ") + spaceText(s.phone) + i18n::text(L" · desktop data: ") + spaceText(s.desktop),
+             gp::RectF(x + dp(18), dp(200), w - dp(36), dp(23)), *g.fSmall, C_DIM);
+        text(gr, i18n::text(L"Shared Android SDK and Vault backups are excluded from phone usage."),
+             gp::RectF(x + dp(18), dp(231), w - dp(36), dp(19)), *g.fSmall, C_DIM);
+        button(gr, gp::RectF(x + w - dp(125), dp(168), dp(106), dp(32)), i18n::text(L"Rescan"), Btn::Secondary, !g.busy,
+               [info] { scanStorage(info); });
+        card(gr, gp::RectF(x, dp(276), w, dp(99)));
+        text(gr, i18n::text(L"Safe cleanup · ") + spaceText(s.reclaimable), gp::RectF(x + dp(18), dp(287), w - dp(36), dp(25)), *g.fBold,
+             C_TEXT);
+        text(gr, i18n::text(L"Recycle quick-boot snapshots, disposable cache and logs. Apps and saves stay."),
+             gp::RectF(x + dp(18), dp(315), w - dp(190), dp(47)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        button(gr, gp::RectF(x + w - dp(153), dp(325), dp(135), dp(32)), i18n::text(L"Review cleanup"), Btn::Secondary,
+               cold && s.reclaimable > 0 && s.error.empty(), [info] {
+                   studio::confirm(g.hwnd, i18n::text(L"Safe cleanup"),
+                                   info.name + L"\n\n" +
+                                       i18n::text(L"Move snapshots, cache.img, cache.img.qcow2, snapshot trust, emulator.log and "
+                                                  L"preview.png to the Windows Recycle Bin? Apps, accounts and saves stay. The next start "
+                                                  L"is a full boot. Disk space is reclaimed when you remove these items from the Bin."),
+                                   i18n::text(L"Recycle cache"), [info](bool yes) {
+                                       if (yes)
+                                           tool([info] {
+                                               instances::cleanup(info.id, reporter());
+                                               instanceUpdated(info);
+                                           });
+                                   });
+               });
+        card(gr, gp::RectF(x, dp(390), w, dp(116)));
+        text(gr, i18n::text(L"Move to another drive"), gp::RectF(x + dp(18), dp(401), w - dp(36), dp(25)), *g.fBold, C_TEXT);
+        text(gr, s.home, gp::RectF(x + dp(18), dp(431), w - dp(36), dp(23)), *g.fSmall, C_DIM);
+        text(gr, i18n::text(L"A verified new copy becomes active. The original stays for Undo move."),
+             gp::RectF(x + dp(18), dp(462), w - dp(190), dp(35)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        button(gr, gp::RectF(x + w - dp(153), dp(462), dp(135), dp(30)), i18n::text(L"Choose drive…"), Btn::Primary,
+               cold && s.error.empty(), [info] {
+                   auto parent = chooseFolder(i18n::text(L"Choose a folder on the destination drive"));
+                   if (parent.empty())
+                       return;
+                   studio::confirm(
+                       g.hwnd, i18n::text(L"Move phone storage?"),
+                       info.name + L"\n\n" + parent + L"\n\n" +
+                           i18n::text(L"Velox creates and verifies a new copy before switching. The original remains on disk. Changes made "
+                                      L"after the move belong to the new copy; Undo returns to the earlier state."),
+                       i18n::text(L"Copy & switch"), [info, parent](bool yes) {
+                           if (yes)
+                               tool([info, parent] {
+                                   instances::relocate(info.id, parent, reporter());
+                                   instanceUpdated(info);
+                               });
+                       });
+               });
+        float storageButton = (w - dp(16)) / 3;
+        button(gr, gp::RectF(x, dp(522), storageButton, dp(34)), i18n::text(L"Open storage"), Btn::Secondary, !s.home.empty() && !g.busy,
+               [s] { openFolder(s.home); });
+        button(gr, gp::RectF(x + storageButton + dp(8), dp(522), storageButton, dp(34)), i18n::text(L"Previous copy"), Btn::Secondary,
+               !g.busy && !s.previous.empty(), [s] { openFolder(s.previous + L"\\avd\\Gaming_Phone.avd"); });
+        button(
+            gr, gp::RectF(x + 2 * (storageButton + dp(8)), dp(522), storageButton, dp(34)), i18n::text(L"Undo move"), Btn::Secondary,
+            cold && !s.previous.empty(), [info] {
+                studio::confirm(
+                    g.hwnd, i18n::text(L"Return to earlier storage?"),
+                    i18n::text(
+                        L"The earlier phone state becomes active. Newer changes in the moved copy stay there. Both copies remain on disk."),
+                    i18n::text(L"Undo move"), [info](bool yes) {
+                        if (yes)
+                            tool([info] {
+                                instances::undoRelocation(info.id, reporter());
+                                instanceUpdated(info);
+                            });
+                    });
+            });
+    }
+    if (vault::progress.running) {
+        text(gr, vault::progress.text(), gp::RectF(x, dp(567), w - dp(110), dp(35)), *g.fSmall, C_DIM);
+        g.vaultAllow = true;
+        button(gr, gp::RectF(x + w - dp(100), dp(567), dp(100), dp(32)), i18n::text(L"Cancel"), Btn::Secondary, true,
+               [] { vault::progress.cancel = true; });
+        g.vaultAllow = false;
+    }
+}
 void drawInstances(gp::Graphics &gr) {
+    if (g.managedPhone) {
+        for (auto &info : g.phones)
+            if (info.id == *g.managedPhone) {
+                drawManagedPhone(gr, info);
+                return;
+            }
+    }
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Velox instances"), i18n::text(L"Stop a phone and close its controls before removing it."));
+    pageHeader(gr, i18n::text(L"Velox instances"), i18n::text(L"Independent phones. Shared Android. Manage each one your way."));
     card(gr, gp::RectF(x, dp(96), w, dp(70)));
     int active = 0, ram = 0, cores = 0;
     for (auto &i : g.phones)
@@ -1264,7 +1568,7 @@ void drawInstances(gp::Graphics &gr) {
         }
     text(gr,
          std::to_wstring(active) + i18n::text(L" running · ") + std::to_wstring(cores) + i18n::text(L" cores · ") + std::to_wstring(ram) +
-             i18n::text(L" GB allocated"),
+             i18n::text(L" GB reserved"),
          gp::RectF(x + dp(18), dp(104), w - dp(200), dp(25)), *g.fBold, C_TEXT);
     text(gr, i18n::text(L"Shared Android. Separate apps, saves and controls."), gp::RectF(x + dp(18), dp(133), w - dp(200), dp(19)),
          *g.fSmall, C_DIM);
@@ -1287,17 +1591,21 @@ void drawInstances(gp::Graphics &gr) {
         float y = dp(181 + row * 126);
         card(gr, gp::RectF(x, y, w, dp(116)));
         art::logo(gr, x + dp(16), y + dp(13), dp(30));
-        text(gr, info.name, gp::RectF(x + dp(58), y + dp(10), w - dp(200), dp(27)), *g.fH2, C_TEXT);
+        text(gr, info.name, gp::RectF(x + dp(58), y + dp(10), w - dp(245), dp(27)), *g.fH2, C_TEXT);
+        button(gr, gp::RectF(x + w - dp(98), y + dp(11), dp(82), dp(29)), i18n::text(L"Manage"), Btn::Secondary, !g.busy, [info] {
+            g.managedPhone = info.id;
+            g.instanceTab = 0;
+        });
         text(gr,
              info.current    ? i18n::text(L"THIS PHONE")
              : info.starting ? i18n::text(L"STARTING")
              : info.active   ? i18n::text(L"RUNNING")
                              : i18n::text(L"READY"),
-             gp::RectF(x + w - dp(145), y + dp(15), dp(125), dp(22)), *g.fSmallBold, info.active ? C_GOOD : C_DIM, gp::StringAlignmentFar);
+             gp::RectF(x + w - dp(224), y + dp(15), dp(112), dp(22)), *g.fSmallBold, info.active ? C_GOOD : C_DIM, gp::StringAlignmentFar);
         text(gr,
              info.starting ? i18n::text(L"Android is starting…")
              : info.active ? std::to_wstring(info.cores) + i18n::text(L" cores · ") + std::to_wstring(info.memory) +
-                                 i18n::text(L" GB · independent phone data")
+                                 i18n::text(L" GB reserved · independent phone data")
              : !info.error.empty() ? info.error
                                    : i18n::text(L"Ready for its own apps, accounts and games"),
              gp::RectF(x + dp(58), y + dp(41), w - dp(78), dp(22)), *g.fSmall, !info.active && !info.error.empty() ? C_BAD : C_DIM);
@@ -1315,19 +1623,21 @@ void drawInstances(gp::Graphics &gr) {
                [info] { instances::command(info.id, instances::Command::CloseControls, reporter()); });
         button(gr, gp::RectF(actionsX + 3 * (actionW + gap), y + dp(75), actionW, dp(29)),
                info.id.empty() ? i18n::text(L"Main phone") : i18n::text(L"Remove phone"), Btn::Ghost,
-               !g.busy && !info.id.empty() && !info.current && !info.active && !info.starting && !info.window,
-               [info] {
-                   studio::confirm(g.hwnd, i18n::text(L"Remove phone"),
-                                   i18n::text(L"Move this phone to the Windows Recycle Bin?") + std::wstring(L"\n\n") + info.name +
-                                       L"\n\n" + i18n::text(L"Its apps, accounts, saves and settings move with it. The main phone, shared Android and external backups stay in place. Restore its folder from the Recycle Bin to undo. Disk space is freed when you empty it.") +
-                                       L"\n\n" + i18n::text(L"Folder to restore: ") + info.id,
-                                   i18n::text(L"Move to Recycle Bin"), [info](bool accepted) {
-                                       if (accepted)
-                                           tool([info] {
-                                               instances::recycle(info.id, reporter());
-                                               PostMessageW(g.hwnd, WM_APP + 56, 0, 0);
-                                           });
-                                   });
+               !g.busy && !info.id.empty() && !info.current && !info.active && !info.starting && !info.window, [info] {
+                   studio::confirm(
+                       g.hwnd, i18n::text(L"Remove phone"),
+                       i18n::text(L"Move this phone to the Windows Recycle Bin?") + std::wstring(L"\n\n") + info.name + L"\n\n" +
+                           i18n::text(
+                               L"Its apps, accounts, saves and settings move with it. The main phone, shared Android and external backups "
+                               L"stay in place. Restore its folder from the Recycle Bin to undo. Disk space is freed when you empty it.") +
+                           L"\n\n" + i18n::text(L"Folder to restore: ") + info.id,
+                       i18n::text(L"Move to Recycle Bin"), [info](bool accepted) {
+                           if (accepted)
+                               tool([info] {
+                                   instances::recycle(info.id, reporter());
+                                   PostMessageW(g.hwnd, WM_APP + 56, 0, 0);
+                               });
+                       });
                });
     }
     button(gr, gp::RectF(x, dp(578), dp(108), dp(30)), i18n::text(L"Previous"), Btn::Ghost, g.instancePage > 0, [] { --g.instancePage; });
@@ -1471,8 +1781,86 @@ void drawLibrary(gp::Graphics &gr) {
     }
 }
 
+std::wstring controlsFile(bool save, const std::wstring &package) {
+    wchar_t file[32768]{};
+    if (save)
+        wcsncpy(file, (package + L".velox-controls").c_str(), 32767);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = g.hwnd;
+    dialog.lpstrFile = file;
+    dialog.nMaxFile = 32768;
+    dialog.lpstrFilter = L"Velox controls (*.velox-controls)\0*.velox-controls\0";
+    dialog.lpstrDefExt = L"velox-controls";
+    dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
+    return (save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog)) ? file : L"";
+}
 void drawControls(gp::Graphics &gr) {
+    if (g.controlsTab) {
+        const float x = X0(), w = CW();
+        pageHeader(gr, i18n::text(L"Velox Share"), i18n::text(L"Bring your setup. Leave personal data behind."));
+        button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Back to controls"), Btn::Secondary, !g.busy,
+               [] { g.controlsTab = 0; });
+        auto profile = playtools::profile();
+        card(gr, gp::RectF(x, dp(96), w, dp(116)));
+        text(gr, i18n::text(L"One game. Both orientations. Your way to play."), gp::RectF(x + dp(18), dp(110), w - dp(36), dp(30)), *g.fBig,
+             C_TEXT);
+        text(gr,
+             i18n::text(L"Export keyboard/mouse bindings, controller preferences and the saved per-game preset in a readable Velox "
+                        L"controls file. Accounts, saves and controller device IDs stay private."),
+             gp::RectF(x + dp(18), dp(150), w - dp(36), dp(52)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        card(gr, gp::RectF(x, dp(230), w, dp(91)));
+        text(gr, profile.package.empty() ? i18n::text(L"Choose a game from Library") : profile.package,
+             gp::RectF(x + dp(18), dp(241), w - dp(36), dp(26)), *g.fBold, C_TEXT);
+        text(gr, i18n::text(L"Saved portrait and landscape profiles are included."), gp::RectF(x + dp(18), dp(281), w - dp(36), dp(24)),
+             *g.fSmall, C_DIM);
+        float half = (w - dp(12)) / 2;
+        button(gr, gp::RectF(x, dp(340), half, dp(42)), i18n::text(L"Export game setup"), Btn::Primary,
+               !g.busy && !profile.package.empty() && !playtools::editing(), [profile] {
+                   auto file = controlsFile(true, profile.package);
+                   if (!file.empty())
+                       tool([profile, file] { playtools::exportLayout(profile.package, file, reporter()); });
+               });
+        button(
+            gr, gp::RectF(x + half + dp(12), dp(340), half, dp(42)), i18n::text(L"Import game setup"), Btn::Secondary,
+            !g.busy && !playtools::editing(), [] {
+                auto file = controlsFile(false, L"");
+                if (file.empty())
+                    return;
+                auto info = playtools::inspectLayout(file);
+                if (!info.valid) {
+                    say(info.error, true);
+                    return;
+                }
+                studio::confirm(
+                    g.hwnd, i18n::text(L"Import this game setup?"),
+                    info.package + L"\n\n" + std::to_wstring(info.bindings) +
+                        i18n::text(L" bindings across portrait and landscape. This replaces this game's saved layouts and preset. Previous "
+                                   L"files are kept in layout-history; unavailable CPU and memory settings fall back to global settings."),
+                    i18n::text(L"Import setup"), [file, info](bool yes) {
+                        if (yes)
+                            tool([file, info] { playtools::importLayout(file, info.package, reporter()); });
+                    });
+            });
+        text(gr,
+             i18n::text(L"Only the reviewed game's setup is imported. Open its preset to adjust resolution, FPS and hardware for this PC."),
+             gp::RectF(x, dp(405), w, dp(64)), *g.fText, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        button(gr, gp::RectF(x, dp(493), w, dp(36)), i18n::text(L"Undo last setup import"), Btn::Secondary,
+               !g.busy && playtools::canUndoImport(), [] {
+                   studio::confirm(
+                       g.hwnd, i18n::text(L"Restore previous game setup?"),
+                       i18n::text(
+                           L"The last imported game's previous layouts and preset become active again. Phone apps and saves stay intact."),
+                       i18n::text(L"Undo import"), [](bool yes) {
+                           if (yes)
+                               tool([] { playtools::undoImport(reporter()); });
+                       });
+               });
+        return;
+    }
     const float x = X0(), w = CW();
+    button(gr, gp::RectF(X0() + CW() - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Share game setup"), Btn::Secondary, !g.busy,
+           [] { g.controlsTab = 1; });
     auto profile = playtools::profile();
     pageHeader(gr, i18n::text(L"Control Studio"), i18n::text(L"Built around the way you play."));
     card(gr, gp::RectF(x, dp(96), w, dp(74)));
@@ -1628,10 +2016,50 @@ void drawDisplay(gp::Graphics &gr) {
     }
 }
 
+void drawBackgroundPolicy(gp::Graphics &gr) {
+    const float x = X0(), w = CW();
+    pageHeader(gr, i18n::text(L"Velox Focus"), i18n::text(L"Give your active game room to breathe."));
+    button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Performance"), Btn::Secondary, !g.busy,
+           [] { g.performanceBackground = false; });
+    card(gr, gp::RectF(x, dp(96), w, dp(124)));
+    text(gr, i18n::text(L"Lighter in the background"), gp::RectF(x + dp(18), dp(111), w - dp(36), dp(31)), *g.fH2, C_TEXT);
+    text(gr,
+         i18n::text(L"When another app or phone has focus, Velox can lower this phone's Android display rate and mute its Windows audio "
+                    L"session. Your normal frame rate and previous mute state return when you come back."),
+         gp::RectF(x + dp(18), dp(155), w - dp(36), dp(55)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    label(gr, i18n::text(L"BACKGROUND DISPLAY LIMIT"), x, dp(243), w);
+    segments(
+        gr, gp::RectF(x, dp(269), w, dp(40)), {i18n::text(L"Keep normal FPS"), L"15 FPS", L"30 FPS", L"60 FPS"},
+        g.set.backgroundRate == 15   ? 1
+        : g.set.backgroundRate == 30 ? 2
+        : g.set.backgroundRate == 60 ? 3
+                                     : 0,
+        [](int) { return !g.busy; },
+        [](int n) {
+            const int v[] = {0, 15, 30, 60};
+            g.set.backgroundRate = v[n];
+            save();
+        });
+    toggle(gr, gp::RectF(x, dp(331), w, dp(68)), i18n::text(L"Mute this phone in the background"),
+           i18n::text(L"Other Windows apps and Android volume stay independent."), g.set.backgroundMute, !g.busy, [] {
+               g.set.backgroundMute = !g.set.backgroundMute;
+               save();
+           });
+    text(gr,
+         i18n::text(L"The display limit is an Android preference; individual games may manage rendering differently. Keep the limit off "
+                    L"for games that need continuous background play. These settings apply while this phone's controls are open."),
+         gp::RectF(x, dp(425), w, dp(92)), *g.fText, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+}
 void drawPerformance(gp::Graphics &gr) {
+    if (g.performanceBackground) {
+        drawBackgroundPolicy(gr);
+        return;
+    }
     const float x = X0(), w = CW();
     pageHeader(gr, i18n::text(L"Performance"), i18n::text(L"How much of this PC the phone may use."));
     float y = dp(96);
+    button(gr, gp::RectF(X0() + CW() - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Background mode"), Btn::Secondary, !g.busy,
+           [] { g.performanceBackground = true; });
     card(gr, gp::RectF(x, y, w, dp(82)));
     text(gr, L"\xE9F5", gp::RectF(x + dp(14), y, dp(24), dp(44)), *g.fIconBig, C_ACCENT, gp::StringAlignmentCenter);
     text(gr, i18n::text(L"Detected on this PC"), gp::RectF(x + dp(48), y + dp(14), w - dp(230), dp(20)), *g.fBold, C_TEXT);
@@ -2426,6 +2854,8 @@ void drawSidebar(gp::Graphics &gr, float H) {
     gp::RectF main(dp(12), H - dp(84), dp(SIDE_W - 24), dp(48));
     if (setupMode) {
         button(gr, main, i18n::text(L"Start phone"), Btn::Primary, false, [] {}, L"\xE768");
+    } else if (st == State::Starting) {
+        button(gr, main, i18n::text(L"Cancel startup"), Btn::Secondary, true, cancelStartingPhone, L"\xE711");
     } else if (st == State::Running && needsRestart()) {
         float half = (main.Width - dp(8)) * 0.62f;
         button(gr, gp::RectF(main.X, main.Y, half, main.Height), i18n::text(L"Restart"), Btn::Primary, true, restartToApply, L"\xE72C");
@@ -2546,6 +2976,12 @@ void monitorLoop() {
     ULONGLONG lastPreview = 0;
     for (;;) {
         Sleep(1000);
+        phone::backgroundTick(g.hwnd);
+        if (!g.backgroundClosing && vault::scheduleDue() && !g.busy.exchange(true)) {
+            vault::runScheduled(reporter());
+            g.busy = false;
+            PostMessageW(g.hwnd, WM_APP + 45, 0, 0);
+        }
         bool visible = g.hwnd && IsWindowVisible(g.hwnd) && !IsIconic(g.hwnd);
         if (visible && g.page == SYSTEM)
             refresh(); // live gauges, also while the phone is off
@@ -2815,7 +3251,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 return 0;
             }
-            if (g.page == RECOVERY && vault::progress.running)
+            if ((g.page == RECOVERY || g.page == INSTANCES) && vault::progress.running)
                 InvalidateRect(hwnd, nullptr, FALSE);
             playtools::tick();
             if (g.set.cursor > 0 && running())
@@ -2839,11 +3275,25 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (wp == TIMER_WATCH) {
+            if (g.closeAfterStartup && phone::state != State::Starting && phone::state != State::Stopping) {
+                g.closeAfterStartup = false;
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                return 0;
+            }
             syncRecordingState();
             State st = phone::state;
             SetPropW(hwnd, L"VeloxPhoneState", reinterpret_cast<HANDLE>(static_cast<INT_PTR>(st) + 1));
-            if (g.page == INSTANCES)
+            if (g.page == INSTANCES) {
                 refreshInstances();
+                if (g.storageDirty && g.managedPhone && g.instanceTab == 1 && !g.busy) {
+                    g.storageDirty = false;
+                    for (auto &info : g.phones)
+                        if (info.id == *g.managedPhone) {
+                            scanStorage(info);
+                            break;
+                        }
+                }
+            }
             if (g.exitAfterStop && st == State::Stopped && !g.busy) {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 return 0;
@@ -2882,6 +3332,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (action == instances::Command::Start)
             startPhone();
         else if (action == instances::Command::Stop) {
+            if (phone::state == State::Starting)
+                cancelStartingPhone();
             if (idle() && running())
                 stopPhone(false);
         } else if (action == instances::Command::CloseControls)
@@ -2889,9 +3341,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_APP + 56:
+        if (wp)
+            reloadRecovery();
         refreshInstances();
+        g.storageDirty = true;
         refresh();
         return 0;
+    case WM_APP + 57: {
+        std::unique_ptr<instances::Storage> storage(reinterpret_cast<instances::Storage *>(lp));
+        if (storage && g.managedPhone && storage->id == *g.managedPhone)
+            g.storage = *storage;
+        refresh();
+        return 0;
+    }
     case playtools::ACTION_MESSAGE: {
         using namespace playtools;
         auto action = static_cast<Action>(wp);
@@ -3135,7 +3597,28 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_APP + 58:
+        g.backgroundReady = true;
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return 0;
     case WM_CLOSE:
+        if (phone::state == State::Starting || phone::state == State::Stopping) {
+            g.closeAfterStartup = true;
+            if (phone::state == State::Starting)
+                cancelStartingPhone();
+            return 0;
+        }
+        if (!g.backgroundClosing) {
+            g.backgroundClosing = true;
+            phone::backgroundPolicy(0, false);
+            std::thread([] {
+                phone::backgroundTick(g.hwnd, true);
+                PostMessageW(g.hwnd, WM_APP + 58, 0, 0);
+            }).detach();
+            return 0;
+        }
+        if (!g.backgroundReady)
+            return 0;
         if (vault::progress.running) {
             g.closeAfterVault = true;
             vault::progress.cancel = true;
@@ -3207,6 +3690,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show) {
     update::cleanup();
     loadSettings(g.set, g.firstRun);
     i18n::language(g.set.language);
+    phone::backgroundPolicy(g.set.backgroundRate, g.set.backgroundMute, g.set.rate);
     // A downloaded update is installed before anything else starts.
     if (instances::id().empty() && g.set.autoUpdate && !instances::otherLaunchers() && update::pendingReady() && update::applyPending()) {
         ReleaseMutex(mutex);

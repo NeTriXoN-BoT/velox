@@ -1,14 +1,14 @@
 <p align="center"><img src="docs/assets/velox-banner.png" alt="Velox — Your games. Your phone. Your space." width="100%"></p>
 
 <p align="center">
-  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-Setup-2.4.0.exe"><img src="docs/assets/download-installer.svg" alt="Download Windows installer" height="46"></a>
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/Velox-Setup-2.5.0.exe"><img src="docs/assets/download-installer.svg" alt="Download Windows installer" height="46"></a>
   &nbsp;
-  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-2.4.0.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/Velox-2.5.0.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
 </p>
 
 > [!IMPORTANT]
 > **Windows publisher warning:** `Velox.exe` and the installer are currently **unsigned**. Windows may show **“Unknown publisher”** or **“Windows protected your PC.”**
-> Before opening a download, check its SHA-256 against [SHA256SUMS.txt from the same release](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.4.0/SHA256SUMS.txt). Follow the [verification and Windows warning guide](docs/VERIFY-DOWNLOADS.md) ([Deutsch](docs/VERIFY-DOWNLOADS.de.md)).
+> Before opening a download, check its SHA-256 against [SHA256SUMS.txt from the same release](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/SHA256SUMS.txt). Follow the [verification and Windows warning guide](docs/VERIFY-DOWNLOADS.md) ([Deutsch](docs/VERIFY-DOWNLOADS.de.md)).
 
 <details>
 <summary>Quick check before installing (PowerShell)</summary>
@@ -18,13 +18,13 @@ Download the file and `SHA256SUMS.txt` from the same official release. Open Powe
 Installer:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-Setup-2.4.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-Setup-2.5.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Portable ZIP:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-2.4.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-2.5.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Compare all 64 characters in `Hash` with the line for that filename in `SHA256SUMS.txt`; upper/lowercase does not matter. If they differ, do not open or install the file. A match confirms that it matches the published release; it does not certify that software is safe or provide a verified publisher.
@@ -61,6 +61,14 @@ The launcher is native C++ and Win32. Android components download directly from 
 | **Recovery** | Verified cold backups, staged restore, interrupted-restore recovery and Undo while preserving the original phone. |
 | **Your look** | Custom toolbar, cursors, boot screens, four distinct Velox-chan wallpapers and your own pictures. |
 | **Convenient imports** | APK, APKS, XAPK, APKM, OBB and ordinary files; screenshots and recordings from the toolbar. |
+
+### More room for your setup
+
+**Instances → Manage** adds names, fresh templates, full cold clones, storage usage, safe cleanup and verified moves with Undo. **Velox Focus** offers background display/audio limits; **Velox Share** moves game controls and presets between installs; **Velox Care** adds bounded backup schedules, startup cancellation and repair.
+
+![Velox phone management](docs/assets/phone-management.png)
+
+Read the [phone management guide](docs/PHONE-MANAGEMENT.md) ([Deutsch](docs/PHONE-MANAGEMENT.de.md)) for what is copied, what stays private and how Undo works.
 
 ### Get started
 

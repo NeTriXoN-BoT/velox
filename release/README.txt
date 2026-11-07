@@ -32,10 +32,41 @@ change them any time (Display, Performance) or press "Use recommended".
 
 
 TIPS
+- Instances > Manage lets you rename a phone or create a fresh template/full cold
+  clone. Stop the source and close its other controls first. Fresh templates copy
+  preferences and layouts, with new Android data. Full clones include PRIVATE
+  accounts, apps and saves; apps may require a new login. Never share a full clone.
+- Manage > Storage shows phone file usage and allocated disk space. Safe cleanup
+  recycles only snapshots, disposable cache and logs. Apps and saves remain.
+  Choose drive copies and verifies storage before switching. The original stays;
+  Undo move returns to that earlier state. Both copies remain on disk. Later
+  changes belong to the moved copy. Keep originals until the new copy is tested.
+  Previous copy opens the original AVD folder for manual storage management;
+  do not delete your shared SDK or other phones.
+- Performance > Background mode can lower Android's display preference to 15/30/60
+  FPS and mute this phone's Windows audio session while another app has focus.
+  Normal FPS and the previous mute state return on focus/close. Individual games
+  may render differently. These options apply while its controls are open.
+- Controls > Share game setup exports both orientations, controller preferences
+  and the saved per-game preset. The readable .velox-controls file contains no
+  accounts, saves or controller device IDs. Import reviews the game first and
+  keeps previous files; Undo last setup import restores them. Interrupted imports
+  recover on reopening. Unsupported hardware values fall back to global settings.
+- Recovery > Schedule & repair offers daily/weekly cold backups. They run only
+  while this phone is stopped and its controls are open. Games are never stopped
+  automatically. Scheduling pauses at either count/GB limit, without deleting
+  recovery points. Move older scheduled backups out of the vault to make room.
+  Manual backups do not count toward these scheduled limits. Failures pause the
+  schedule; fix the cause, then use Resume schedule to try again.
+- Cancel startup stops only this phone's owned startup. Startup repair verifies
+  Google tools, rebuilds device configuration and bypasses stale quick-boot state.
+  It never wipes apps or saves; missing disks require a verified Vault restore.
 - Instances: New phone creates an independent Android phone using the SDK already
   installed. Run the main phone and up to eight additional phones as resources allow.
   Each new phone starts with 2 cores, 2 GB RAM and 60 FPS; adjust its own Performance
   page. Combined allocations reserve RAM for Windows and stay within the CPU budget.
+  RAM choices are guest targets. The running-phone budget reserves at least 3 GB
+  per phone to cover this Android image's minimum; process/graphics overhead is extra.
 - Open controls opens that phone's Velox window. Closing its controls leaves Android
   running; reopening reconnects to that same phone. Stop phone affects only that phone.
   Apps, accounts, saves, presets, controls, preferences and captures stay separate.

@@ -36,10 +36,13 @@ public class BridgeProvider extends ContentProvider {
         if ("sync".equals(method) && arg != null && arg.matches("[012],[01],[0-9]{1,19},[01]")) {
             synchronized (Catalog.SETTINGS_LOCK) {
                 String[] f = arg.split(",");
+                long revision;
+                try { revision = Long.parseLong(f[2]); }
+                catch (NumberFormatException invalidRevision) { return b; }
                 SharedPreferences.Editor edit =
-                    p.edit().putLong("desktopSeen", System.currentTimeMillis()).putLong("desktopAck", Long.parseLong(f[2]));
+                    p.edit().putLong("desktopSeen", System.currentTimeMillis()).putLong("desktopAck", revision);
                 // Don't overwrite an Android edit made after the desktop read its state.
-                if (p.getLong("revision", 0) <= Long.parseLong(f[2]))
+                if (p.getLong("revision", 0) <= revision)
                     edit.putInt("navigation", Integer.parseInt(f[0])).putBoolean("rotate", f[1].equals("1")).putInt("language", Integer.parseInt(f[3]));
                 edit.apply();
                 b.putBoolean("ok", true);

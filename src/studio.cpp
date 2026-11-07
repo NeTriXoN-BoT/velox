@@ -6,6 +6,8 @@
 #include <dwmapi.h>
 #include <windowsx.h>
 #include <memory>
+#include <commctrl.h>
+#include <uxtheme.h>
 namespace phone::studio {
 namespace {
 struct Hit {
@@ -14,7 +16,17 @@ struct Hit {
     bool enabled;
 };
 struct Window {
-    HWND hwnd = nullptr, owner = nullptr;
+    HWND hwnd = nullptr, owner = nullptr, edit = nullptr;
+    HFONT editFont = nullptr;
+    HBRUSH editBrush = nullptr;
+    std::wstring initial;
+    std::function<void(const std::wstring &)> inputCallback;
+    ~Window() {
+        if (editFont)
+            DeleteObject(editFont);
+        if (editBrush)
+            DeleteObject(editBrush);
+    }
     int type = 0, hover = -1, pressed = -1, bodyHeight = 113;
     float scale = 1;
     experience::AppInfo app;
@@ -26,7 +38,7 @@ struct Window {
     std::wstring error, title, message, accept;
     std::function<void(bool)> callback;
     bool creating = true;
-    int height() const { return type == 2 ? bodyHeight + 227 : type == 1 ? 650 : 660; }
+    int height() const { return type == 3 ? 370 : type == 2 ? bodyHeight + 227 : type == 1 ? 650 : 660; }
     void measureConfirmation() {
         if (type != 2)
             return;
@@ -76,6 +88,25 @@ struct Window {
                 g, names[i], gp::RectF(32 + i * (width + gap), y + 23, width, 34), [choose, i] { choose(int(i)); }, int(i) == selected,
                 !enabled || enabled(int(i)));
     }
+
+    void acceptInput() {
+        wchar_t value[41]{};
+        GetWindowTextW(edit, value, 41);
+        std::wstring name(value);
+        while (!name.empty() && iswspace(name.front()))
+            name.erase(name.begin());
+        while (!name.empty() && iswspace(name.back()))
+            name.pop_back();
+        if (name.empty() || name.find_first_of(L"\r\n\t[]=\x7f") != std::wstring::npos) {
+            error = i18n::text(L"Use 1–40 characters without line breaks or INI symbols.");
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return;
+        }
+        auto cb = inputCallback;
+        close(true);
+        if (cb)
+            cb(name);
+    }
     void close(bool accepted = false) {
         auto cb = callback;
         auto handle = hwnd;
@@ -93,9 +124,19 @@ struct Window {
         text(g,
              type == 0   ? i18n::text(L"GAME PRESETS")
              : type == 1 ? i18n::text(L"CONTROLLER STUDIO")
+             : type == 3 ? i18n::text(L"VELOX · NAME")
                          : i18n::text(L"VELOX · CONFIRM"),
              86, 25, 600, 25, 18, C_TEXT, true);
-        text(g, type == 2 ? title : app.label, 86, 51, 600, 23, 13, C_DIM, false, false, type != 2);
+        text(g, type >= 2 ? title : app.label, 86, 51, 600, 23, 13, C_DIM, false, false, type < 2);
+        if (type == 3) {
+            text(g, message, 32, 95, 656, 85, 14, C_TEXT);
+            card(g, 28, 194, 664, 52);
+            if (!error.empty())
+                text(g, error, 32, 252, 656, 43, 12, C_WARN);
+            button(g, i18n::text(L"Cancel"), gp::RectF(385, 308, 140, 38), [this] { close(false); });
+            button(g, accept, gp::RectF(537, 308, 155, 38), [this] { acceptInput(); }, true);
+            return;
+        }
         if (type == 2) {
             card(g, 28, 100, 664, float(bodyHeight + 22));
             text(g, message, 48, 110, 624, float(bodyHeight), 14, C_TEXT);
@@ -268,6 +309,27 @@ struct Window {
             text(g, error, 32, float(height() - 57), 370, 48, 11, C_BAD);
     }
 };
+
+LRESULT CALLBACK inputProcedure(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR, DWORD_PTR data) {
+    auto *c = reinterpret_cast<Window *>(data);
+    if (m == WM_KEYDOWN) {
+        if (w == VK_ESCAPE) {
+            c->close(false);
+            return 0;
+        }
+        if (w == VK_RETURN) {
+            c->acceptInput();
+            return 0;
+        }
+        if (w == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            SendMessageW(h, EM_SETSEL, 0, -1);
+            return 0;
+        }
+    }
+    if (m == WM_CHAR && (w == VK_RETURN || w == VK_ESCAPE))
+        return 0;
+    return DefSubclassProc(h, m, w, l);
+}
 LRESULT CALLBACK procedure(HWND h, UINT m, WPARAM w, LPARAM l) {
     auto *c = reinterpret_cast<Window *>(GetWindowLongPtrW(h, GWLP_USERDATA));
     if (m == WM_NCCREATE) {
@@ -291,6 +353,20 @@ LRESULT CALLBACK procedure(HWND h, UINT m, WPARAM w, LPARAM l) {
         DwmSetWindowAttribute(h, 35, &color, sizeof(color));
         if (c->owner)
             EnableWindow(c->owner, FALSE);
+
+        if (c->type == 3) {
+            c->editBrush = CreateSolidBrush(RGB(26, 29, 38));
+            c->editFont = CreateFontW(-int(16 * c->scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            c->edit = CreateWindowExW(0, L"EDIT", c->initial.c_str(), WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                      int(44 * c->scale), int(209 * c->scale), int(628 * c->scale), int(26 * c->scale), h, nullptr,
+                                      GetModuleHandleW(nullptr), nullptr);
+            SetWindowTheme(c->edit, L"", L"");
+            SendMessageW(c->edit, WM_SETFONT, reinterpret_cast<WPARAM>(c->editFont), TRUE);
+            SendMessageW(c->edit, EM_LIMITTEXT, 40, 0);
+            SendMessageW(c->edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+            SetWindowSubclass(c->edit, inputProcedure, 1, reinterpret_cast<DWORD_PTR>(c));
+        }
         if (c->type == 1) {
             c->reader = std::make_unique<controllers::Reader>(h, false);
             SetTimer(h, 1, 50, nullptr);
@@ -322,6 +398,10 @@ LRESULT CALLBACK procedure(HWND h, UINT m, WPARAM w, LPARAM l) {
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_CTLCOLOREDIT:
+        SetTextColor(reinterpret_cast<HDC>(w), RGB(242, 243, 247));
+        SetBkColor(reinterpret_cast<HDC>(w), RGB(26, 29, 38));
+        return reinterpret_cast<LRESULT>(c->editBrush);
     case WM_ERASEBKGND:
         return 1;
     case WM_MOUSEMOVE: {
@@ -403,9 +483,13 @@ void open(Window *c) {
                                             : i18n::text(L"Velox · Review"),
                              WS_CAPTION | WS_SYSMENU, x, y, width, height, c->owner, nullptr, GetModuleHandleW(nullptr), c);
     c->creating = false;
-    if (h)
+    if (h) {
         ShowWindow(h, SW_SHOW);
-    else
+        if (c->edit) {
+            SetFocus(c->edit);
+            SendMessageW(c->edit, EM_SETSEL, 0, -1);
+        }
+    } else
         delete c;
 }
 } // namespace
@@ -438,6 +522,19 @@ void confirm(HWND owner, const std::wstring &title, const std::wstring &message,
     c->message = message;
     c->accept = accept;
     c->callback = std::move(callback);
+    open(c);
+}
+
+void input(HWND owner, const std::wstring &title, const std::wstring &message, const std::wstring &initial, const std::wstring &accept,
+           std::function<void(const std::wstring &)> callback) {
+    auto *c = new Window;
+    c->owner = owner;
+    c->type = 3;
+    c->title = title;
+    c->message = message;
+    c->initial = initial.substr(0, 40);
+    c->accept = accept;
+    c->inputCallback = std::move(callback);
     open(c);
 }
 void preview(gp::Graphics &g, int type, const experience::AppInfo &app, const Settings &global) {
