@@ -1,9 +1,9 @@
 <p align="center"><img src="docs/assets/velox-banner.png" alt="Velox — Your games. Your phone. Your space." width="100%"></p>
 
 <p align="center">
-  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-Setup-2.3.0.exe"><img src="docs/assets/download-installer.svg" alt="Download Windows installer" height="46"></a>
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-Setup-2.3.1.exe"><img src="docs/assets/download-installer.svg" alt="Download Windows installer" height="46"></a>
   &nbsp;
-  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-2.3.0.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-2.3.1.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
 </p>
 <p align="center">
   <a href="https://github.com/NeTriXoN-BoT/velox/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NeTriXoN-BoT/velox?color=8864ff&label=release"></a>

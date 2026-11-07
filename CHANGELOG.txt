@@ -1,29 +1,33 @@
 # Velox changelog, newest first.
-# A version starts with "<version> | <date>", followed by [New]
-- A dark Velox installer with English/German setup, optional desktop shortcut and data-preserving uninstall.
-- Hands-off first-run startup and language defaults, with an optional main-phone auto-start setting.
-- English and German for desktop Velox, Home, Settings and controller tools, with per-phone language sync.
-- Screen resolution shortcut in the phone toolbar., [Improved]
-- Hardware-aware 48/64 CPU and RAM choices, disabled unsupported allocations, separate physical/logical CPU counts and safe lower-host resolution.
-- Recommendations consider the active desktop resolution/refresh, GPU memory type, available RAM and other running phones.
-- Clean dark text fields without gray cue-banner backgrounds or duplicate search text. and [Fixed]
-- Android CPU limits are detected after boot; unsupported allocations are disabled and resource reservations corrected.
-- First-run setup language and existing-SDK actions no longer overlap. sections
-# of "- " lines. Velox shows it on the Updates page; release\make-release.ps1 turns the newest
-# version's lines into the update notes.
+# Each version has [New], [Improved] and [Fixed] sections with "- " entries.
+# The launcher displays this file and the release builder signs its current entries.
+
+2.3.1 | 2026-11-07
+[Fixed]
+- Release entries now appear in their proper changelog sections and the Updates page.
+- The MIT license uses its standard text; separate third-party notices retain all component licenses.
 
 2.3.0 | 2026-11-07
 [New]
+- A dark Velox installer with English/German setup, optional desktop shortcut and data-preserving uninstall.
+- Hands-off first-run startup and language defaults, with an optional main-phone auto-start setting.
+- English and German for desktop Velox, Home, Settings and controller tools, with per-phone language sync.
+- Screen resolution shortcut in the phone toolbar.
 - Velox Instances: create and run independent phones together with a shared SDK, separate apps/accounts/saves/controls, and individual start, stop and controls windows.
 - Combined CPU/RAM allocation checks, unique connection ports and verified process ownership keep simultaneous phones separate.
 - Velox Vault: verified cold phone backups, staged recovery into a separate phone, Undo restore and interrupted-recovery rollback.
 - Per-game presets for display, 30-144 FPS, CPU, memory, graphics and fullscreen, with a restart review and separate global settings.
 - Controller Studio: Xbox-compatible and DirectInput controllers, native non-root Android gamepad input, touch buttons/sticks, dead zones, sensitivity and camera-Y inversion.
 [Improved]
+- Hardware-aware 48/64 CPU and RAM choices, disabled unsupported allocations, separate physical/logical CPU counts and safe lower-host resolution.
+- Recommendations consider the active desktop resolution/refresh, GPU memory type, available RAM and other running phones.
 - Four individually designed Velox-chan wallpapers with everyday clothes, fine anime linework and atmospheric scenes: After Hours, Blue Hour, Stargazer and Windowlight.
 - Recovery stays accessible when phone data is missing but a matching Android SDK is available.
 - Sidebar spacing accommodates Recovery without overlapping the phone status panel.
 [Fixed]
+- Clean dark text fields without gray cue-banner backgrounds or duplicate search text.
+- Android CPU limits are detected after boot; unsupported allocations are disabled and resource reservations corrected.
+- First-run setup language and existing-SDK actions no longer overlap.
 - A matching window title or port alone can no longer make Velox adopt an unrelated emulator process.
 - Concurrent phone backups have unique names, and large backup checksum operations respond to cancellation between reads.
 - Recovery paths support non-English folder names; prepared disk files stay protected until activation and locks release after failures.

@@ -1,6 +1,6 @@
 # Release validation
 
-Velox 2.3.0 was checked on an x64 Windows 11 host using isolated application folders, Android profiles and private test desktops. This is a clean application/profile test on the existing OS, not a newly installed Windows VM or a certification across different hardware.
+Velox 2.3.1 was checked on an x64 Windows 11 host using isolated application folders, Android profiles and private test desktops. This is a clean application/profile test on the existing OS, not a newly installed Windows VM or a certification across different hardware.
 
 | Area | Result |
 | :-- | :-- |
