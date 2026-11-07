@@ -662,7 +662,7 @@ void restartForUpdate() {
 
 std::vector<App::ChangeVersion> parseChanges(const std::wstring &textIn, const std::wstring &defaultVersion = L"");
 
-const wchar_t *KIND_NAMES[] = {i18n::text(L"NEW"), i18n::text(L"IMPROVED"), i18n::text(L"FIXED")};
+const wchar_t *KIND_NAMES[] = {L"NEW", L"IMPROVED", L"FIXED"};
 const gp::ARGB KIND_COLORS[] = {0xFF9F86FF, 0xFF5E9BFF, 0xFF3DD68C};
 
 std::wstring niceDate(const std::wstring &iso) {
@@ -672,6 +672,11 @@ std::wstring niceDate(const std::wstring &iso) {
     int m = _wtoi(iso.substr(5, 2).c_str()), d = _wtoi(iso.substr(8, 2).c_str());
     if (m < 1 || m > 12)
         return iso;
+    if (i18n::language() == 1) {
+        static const wchar_t *germanMonths[] = {L"Jan.", L"Feb.", L"März", L"Apr.", L"Mai", L"Juni",
+                                               L"Juli", L"Aug.", L"Sept.", L"Okt.", L"Nov.", L"Dez."};
+        return std::to_wstring(d) + L". " + germanMonths[m - 1] + L" " + iso.substr(0, 4);
+    }
     return std::wstring(months[m - 1]) + L" " + std::to_wstring(d) + L", " + iso.substr(0, 4);
 }
 
@@ -697,11 +702,12 @@ float drawChanges(gp::Graphics &gr, const std::vector<App::ChangeVersion> &list,
             if (!any)
                 continue;
             gp::RectF m;
-            gr.MeasureString(KIND_NAMES[kind], -1, g.fSmallBold.get(), gp::PointF(0, 0), &m);
+            const wchar_t *label = i18n::text(KIND_NAMES[kind]);
+            gr.MeasureString(label, -1, g.fSmallBold.get(), gp::PointF(0, 0), &m);
             gp::RectF pill(x, y, m.Width + dp(16), dp(20));
             gp::Color kc(KIND_COLORS[kind]);
             roundFill(gr, pill, dp(10), gp::Color(46, kc.GetR(), kc.GetG(), kc.GetB()).GetValue());
-            text(gr, KIND_NAMES[kind], pill, *g.fSmallBold, KIND_COLORS[kind], gp::StringAlignmentCenter);
+            text(gr, label, pill, *g.fSmallBold, KIND_COLORS[kind], gp::StringAlignmentCenter);
             y += dp(28);
             for (auto &it : v.items) {
                 if (it.first != kind)

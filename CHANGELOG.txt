@@ -5,6 +5,7 @@
 2.3.1 | 2026-11-07
 [Fixed]
 - Release entries now appear in their proper changelog sections and the Updates page.
+- German release labels resize when switching languages, and dates use the selected language.
 - The MIT license uses its standard text; separate third-party notices retain all component licenses.
 
 2.3.0 | 2026-11-07
