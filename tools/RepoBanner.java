@@ -27,13 +27,13 @@ public class RepoBanner {
         for(int i=0;i<6;i++){g.setColor(new Color(160,149,244,13));g.setStroke(new BasicStroke(2));g.drawLine(740+i*105,-20,300+i*105,740);}
         g.drawImage(VeloxIcon.render(92),70,65,null);
         text(g,"VELOX",185,126,60,Font.BOLD,0xf4f6ff);
-        text(g,"ANDROID GAMING FOR WINDOWS",74,201,18,Font.BOLD,0xafa1f6);
+        text(g,"ANDROID GAMING FOR WINDOWS & LINUX",74,201,18,Font.BOLD,0xafa1f6);
         text(g,"Your games.",68,291,65,Font.BOLD,0xffffff);
         text(g,"Your phone.",68,369,65,Font.BOLD,0xffffff);
         text(g,"Your space.",68,447,65,Font.BOLD,0xbcaaff);
         pill(g,"Game library",74,498,154);pill(g,"Custom controls",241,498,185);pill(g,"Multiple phones",439,498,185);
         text(g,"Open source. Made for your play style.",74,600,25,Font.PLAIN,0xc8cde3);
-        text(g,"Windows 10 / 11   ·   English & Deutsch",74,645,19,Font.PLAIN,0x8994b5);
+        text(g,"Windows 10 / 11   ·   Linux   ·   English & Deutsch",74,645,19,Font.PLAIN,0x8994b5);
         // A stylized phone preview uses the shipped artwork without personal UI data.
         for(int i=24;i>0;i--){g.setColor(new Color(0,0,0,3));g.fillRoundRect(1010-i,53-i,290+i*2,618+i*2,66+i,66+i);}
         g.setColor(new Color(0x45485f));g.fillRoundRect(1006,49,298,626,66,66);

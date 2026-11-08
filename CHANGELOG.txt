@@ -1,3 +1,7 @@
+Unreleased
+[Improved]
+- Repository artwork now reflects Windows and Linux support.
+
 2.7.0 | 2026-11-08
 [New]
 - Linux x86-64 AppImage with the Velox interface, automatic Android setup, game library, independent phones and controls.
