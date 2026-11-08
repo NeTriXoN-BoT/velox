@@ -34,6 +34,7 @@
 #include "vault.hpp"
 #include "studio.hpp"
 #include "instances.hpp"
+#include "window_scale.hpp"
 
 using namespace phone;
 
@@ -61,6 +62,7 @@ struct Hit {
 struct App {
     HWND hwnd = nullptr, numberEdit = nullptr, searchEdit = nullptr;
     float s = 1.f;
+    bool displayScaling = false, sizing = false;
     Settings set;
     bool firstRun = false;
     Page page = LIBRARY;
@@ -158,9 +160,12 @@ bool needsRestart() {
            (phone::navigationNeedsRestart() || (phone::runningKnown() && signature(sessionSettings()) != signature(phone::running)));
 }
 
+void resizeToContent(const RECT *anchor = nullptr);
+
 void save() {
     saveSettings(g.set);
     experience::hostPreferences(g.set);
+    playtools::windowScale(g.set.phonePercent);
 }
 
 LRESULT CALLBACK fieldProc(HWND h, UINT message, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
@@ -1924,9 +1929,58 @@ void drawControls(gp::Graphics &gr) {
            [] { tool([] { experience::openSettings(reporter()); }); });
 }
 
+void drawScaling(gp::Graphics &gr) {
+    const float x = X0(), w = CW();
+    pageHeader(gr, i18n::text(L"Window scaling"), i18n::text(L"A comfortable fit on every display."));
+    button(gr, gp::RectF(x + w - dp(104), dp(28), dp(104), dp(34)), i18n::text(L"Back"), Btn::Secondary, true,
+           [] { g.displayScaling = false; });
+    card(gr, gp::RectF(x, dp(96), w, dp(94)));
+    auto screen = scaling::desktop(g.hwnd);
+    text(gr, i18n::text(L"THIS DISPLAY"), gp::RectF(x + dp(18), dp(109), w - dp(36), dp(20)), *g.fSmallBold, C_FAINT);
+    std::wstring monitor = std::to_wstring(host().monitorW) + L" × " + std::to_wstring(host().monitorH) + L"  ·  Windows " +
+                           std::to_wstring(MulDiv(screen.dpi, 100, 96)) + L"%";
+    text(gr, monitor, gp::RectF(x + dp(18), dp(139), w - dp(36), dp(26)), *g.fH2, C_TEXT);
+    auto choices = [&](float y, const wchar_t *title, int selected, std::vector<int> values, bool phoneWindow) {
+        label(gr, title, x, dp(y), w);
+        if (selected && std::find(values.begin(), values.end(), selected) == values.end())
+            values.push_back(selected);
+        const float gap = dp(6), width = (w - gap * float(values.size() - 1)) / float(values.size());
+        for (size_t i = 0; i < values.size(); ++i) {
+            int value = values[i];
+            button(gr, gp::RectF(x + i * (width + gap), dp(y + 25), width, dp(38)),
+                   value ? std::to_wstring(value) + L"%" : i18n::text(L"Auto"), value == selected ? Btn::Primary : Btn::Secondary, true,
+                   [value, phoneWindow] {
+                       if (phoneWindow)
+                           g.set.phonePercent = value;
+                       else
+                           g.set.uiPercent = value;
+                       save();
+                       resizeToContent();
+                   });
+        }
+    };
+    choices(212, i18n::text(L"VELOX INTERFACE"), g.set.uiPercent, {0, 75, 100, 125, 150, 175, 200, 250, 300}, false);
+    text(gr,
+         i18n::text(L"Applied: ") + std::to_wstring(int(std::lround(g.s * 100))) + L"%" + (g.set.uiPercent ? L"" : i18n::text(L" · Auto")),
+         gp::RectF(x, dp(284), w, dp(22)), *g.fBold, C_TEXT);
+    text(gr, i18n::text(L"Auto balances Windows scaling and desktop space. Text and controls redraw at the chosen size."),
+         gp::RectF(x, dp(313), w, dp(42)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    choices(380, i18n::text(L"PHONE WINDOW"), g.set.phonePercent, {0, 25, 33, 40, 50, 67, 75, 100}, true);
+    int phoneSize = playtools::windowPercent();
+    text(gr, phoneSize ? i18n::text(L"Applied: ") + std::to_wstring(phoneSize) + L"%" : i18n::text(L"Applies when the phone opens."),
+         gp::RectF(x, dp(452), w, dp(22)), *g.fBold, C_TEXT);
+    text(gr,
+         i18n::text(L"Auto fits the phone and toolbar after rotation or a monitor change. Percentages use Android's render resolution."),
+         gp::RectF(x, dp(481), w, dp(46)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    text(gr, i18n::text(L"Oversized choices fit safely within the desktop. Android resolution and game quality stay separate."),
+         gp::RectF(x, dp(552), w, dp(44)), *g.fSmall, C_FAINT, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+}
+
 void drawDisplay(gp::Graphics &gr) {
     const float x = X0(), w = CW();
     pageHeader(gr, i18n::text(L"Display"), i18n::text(L"Screen, rotation and Android navigation."));
+    button(gr, gp::RectF(x + w - dp(156), dp(28), dp(156), dp(34)), i18n::text(L"Window scaling"), Btn::Secondary, true,
+           [] { g.displayScaling = true; });
     label(gr, i18n::text(L"RESOLUTION"), x, dp(96), w);
     float cw = (w - dp(16)) / 3, ch = dp(64);
     for (size_t i = 0; i < displays().size(); i++) {
@@ -2427,6 +2481,7 @@ void drawSystem(gp::Graphics &gr) {
     const float x = X0(), w = CW();
     pageHeader(gr, i18n::text(L"System"), i18n::text(L"Live usage of this PC and your phone."));
     languagePicker(gr);
+    button(gr, gp::RectF(x, dp(580), w, dp(30)), i18n::text(L"Window scaling"), Btn::Secondary, true, [] { g.displayScaling = true; });
     sysmon::Sample s = sysmon::latest();
     std::vector<sysmon::Sample> hist = sysmon::history();
     const HostInfo &h = host();
@@ -2487,7 +2542,7 @@ void drawSystem(gp::Graphics &gr) {
     // Specs sheet.
     sysmon::Specs sp = sysmon::specs();
     sp.display = std::to_wstring(h.monitorW) + L" × " + std::to_wstring(h.monitorH) + L"  ·  " + std::to_wstring(h.monitorHz) + L" Hz";
-    gp::RectF sc(x, y, w, dp(600 - 96 - 164 - 12 - 116 - 8) - dp(2));
+    gp::RectF sc(x, y, w, dp(580 - 96 - 164 - 12 - 116 - 8) - dp(2));
     card(gr, sc);
     std::pair<const wchar_t *, std::wstring> rows[] = {
         {i18n::text(L"Processor"), sp.cpu}, {i18n::text(L"Graphics"), sp.gpu},
@@ -2928,7 +2983,10 @@ void paint(HDC dc, int cw, int ch) {
             drawControls(gr);
             break;
         case DISPLAY:
-            drawDisplay(gr);
+            if (g.displayScaling)
+                drawScaling(gr);
+            else
+                drawDisplay(gr);
             break;
         case PERFORMANCE:
             drawPerformance(gr);
@@ -2943,7 +3001,10 @@ void paint(HDC dc, int cw, int ch) {
             drawRecovery(gr);
             break;
         case SYSTEM:
-            drawSystem(gr);
+            if (g.displayScaling)
+                drawScaling(gr);
+            else
+                drawSystem(gr);
             break;
         default:
             drawUpdates(gr);
@@ -3143,10 +3204,34 @@ void loadChangelog() {
     g.changes = parseChanges(widen(s));
 }
 
-void resizeToContent() {
-    RECT rc{0, 0, static_cast<LONG>(dp(WIN_W)), static_cast<LONG>(dp(WIN_H))};
-    AdjustWindowRectExForDpi(&rc, GetWindowLongW(g.hwnd, GWL_STYLE), FALSE, 0, static_cast<UINT>(g.s * 96));
-    SetWindowPos(g.hwnd, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+void resizeToContent(const RECT *anchor) {
+    if (!g.hwnd || g.sizing || IsIconic(g.hwnd))
+        return;
+    g.sizing = true;
+    auto screen = scaling::desktop(g.hwnd, anchor);
+    auto frame = scaling::outer(g.hwnd, 0, 0, screen.dpi);
+    int percent =
+        scaling::launcher(screen.width(), screen.height(), screen.dpi, g.set.uiPercent, frame.right - frame.left, frame.bottom - frame.top);
+    float next = percent / 100.f;
+    if (std::abs(next - g.s) > .001f) {
+        g.s = next;
+        createFonts();
+        g.background.reset();
+        g.hover = g.pressed = -1;
+        g.hits.clear();
+    }
+    SetPropW(g.hwnd, scaling::PROPERTY, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(percent)));
+    SetPropW(g.hwnd, scaling::REQUESTED, reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(g.set.uiPercent)));
+    RECT current{};
+    GetWindowRect(g.hwnd, &current);
+    RECT size = scaling::outer(g.hwnd, int(std::lround(dp(WIN_W))), int(std::lround(dp(WIN_H))), screen.dpi);
+    int width = size.right - size.left, height = size.bottom - size.top;
+    auto point = scaling::position(anchor ? *anchor : current, screen, width, height);
+    if (current.left != point.x || current.top != point.y || current.right - current.left != width ||
+        current.bottom - current.top != height)
+        SetWindowPos(g.hwnd, nullptr, point.x, point.y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(g.hwnd, nullptr, FALSE);
+    g.sizing = false;
 }
 
 int hitAt(POINT p) {
@@ -3192,23 +3277,23 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTimer(hwnd, TIMER_WATCH, 500, nullptr);
         SetTimer(hwnd, TIMER_CURSOR, 30, nullptr);
         playtools::initialize(hwnd);
+        playtools::windowScale(g.set.phonePercent);
         return 0;
     }
     case WM_EXITSIZEMOVE:
     case WM_DISPLAYCHANGE:
+        resizeToContent();
         refreshHost(hwnd);
         refresh();
         return 0;
-    case WM_DPICHANGED: {
-        g.s = HIWORD(wp) / 96.f;
-        createFonts();
-        g.background.reset();
-        auto *r = reinterpret_cast<RECT *>(lp);
-        SetWindowPos(hwnd, nullptr, r->left, r->top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        resizeToContent();
-        InvalidateRect(hwnd, nullptr, FALSE);
+    case WM_SETTINGCHANGE:
+        if (wp == SPI_SETWORKAREA)
+            resizeToContent();
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    case WM_DPICHANGED:
+        resizeToContent(reinterpret_cast<RECT *>(lp));
+        refreshHost(hwnd);
         return 0;
-    }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
         HDC dc = reinterpret_cast<HDC>(wp);
@@ -3364,7 +3449,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             playtools::focusPhone();
             return 0;
         }
-        if (action == ScreenResolution) {
+        if (action == ScreenResolution || action == WindowScaling) {
+            g.displayScaling = action == WindowScaling;
             g.page = DISPLAY;
             ShowWindow(g.searchEdit, SW_HIDE);
             ShowWindow(g.numberEdit, SW_HIDE);
@@ -3631,6 +3717,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         overlay::restoreCursor();
         return 0;
     case WM_DESTROY:
+        RemovePropW(hwnd, scaling::PROPERTY);
+        RemovePropW(hwnd, scaling::REQUESTED);
         playtools::shutdown();
         overlay::restoreCursor();
         PostQuitMessage(0);

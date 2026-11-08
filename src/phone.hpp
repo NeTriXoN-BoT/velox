@@ -50,6 +50,7 @@ struct Settings {
     int language = 0;       // 0 English, 1 Deutsch; per phone, independent of Android system language
     int backgroundRate = 0; // 0 keeps the normal frame rate
     bool backgroundMute = false;
+    int uiPercent = 0, phonePercent = 0; // 0 Auto; desktop window sizes, independent of Android resolution
 };
 Settings settingsForHardware(const HostInfo &hardware, int cpuBudget, int ramBudget, int availableGB = -1);
 Settings recommended(); // the best settings for this PC

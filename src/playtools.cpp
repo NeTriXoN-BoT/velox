@@ -1,4 +1,5 @@
 #include "playtools.hpp"
+#include "window_scale.hpp"
 #include "experience.hpp"
 #include "controllers.hpp"
 #include "presets.hpp"
@@ -26,6 +27,10 @@ std::atomic<DWORD> phonePid{0};
 std::atomic<HWND> focusEmu{nullptr};
 RECT viewport{};
 float scale = 1;
+int requestedPercent = 0, effectivePercent = 0;
+std::array<INT_PTR, 10> fitApplied{}, fitPending{};
+ULONGLONG fitAfter = 0;
+RECT fitGeometry{};
 bool showBar = true, leftDock = false, collapsed = false, isFullscreen = false, stockWasVisible = false, nativeControls = false;
 WINDOWPLACEMENT oldPlacement = [] {
     WINDOWPLACEMENT p{};
@@ -602,6 +607,7 @@ void menu(HWND h, int selectedTool) {
     AppendMenuW(m, MF_STRING, 101, leftDock ? i18n::text(L"Dock on right") : i18n::text(L"Dock on left"));
     AppendMenuW(m, MF_STRING | (stockBar ? 0 : MF_GRAYED), 102,
                 nativeControls ? i18n::text(L"Hide Android emulator controls") : i18n::text(L"Show Android emulator controls"));
+    AppendMenuW(m, MF_STRING, WindowScaling, i18n::text(L"Window scaling"));
     AppendMenuW(m, MF_STRING, Rotate, i18n::text(L"Rotate phone manually"));
     if (selectedTool >= 0) {
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -971,6 +977,9 @@ void findWindows() {
         stockWasVisible = false;
         nativeControls = false;
         isFullscreen = false;
+        fitApplied = {};
+        fitPending = {};
+        effectivePercent = 0;
         emu = display = nullptr;
     }
     stockBar = nullptr;
@@ -1039,7 +1048,93 @@ void findWindows() {
     stockBar = c.stock;
 }
 
+// Qt owns the phone's aspect ratio. Refit only on an environment/policy change,
+// after its geometry settles, rather than sending competing resize requests each tick.
+void fitPhoneWindow() {
+    if (!emu || !display || isFullscreen || IsZoomed(emu))
+        return;
+    DWORD windowPid = 0, displayPid = 0;
+    GetWindowThreadProcessId(emu, &windowPid);
+    GetWindowThreadProcessId(display, &displayPid);
+    if (!phonePid || windowPid != phonePid || displayPid != phonePid || !IsChild(emu, display))
+        return;
+    RECT window{}, screenRect{};
+    if (!GetWindowRect(emu, &window) || !GetWindowRect(display, &screenRect))
+        return;
+    int screenW = screenRect.right - screenRect.left, screenH = screenRect.bottom - screenRect.top;
+    if (screenW < 40 || screenH < 40)
+        return;
+    auto monitor = scaling::desktop(emu);
+    const auto &render = displays()[std::clamp(running.display, 0, int(displays().size()) - 1)];
+    bool landscape = screenW > screenH;
+    int renderW = landscape ? std::max(render.w, render.h) : std::min(render.w, render.h);
+    int renderH = landscape ? std::min(render.w, render.h) : std::max(render.w, render.h);
+    effectivePercent = int(std::lround(100.0 * screenW / renderW));
+    std::array<INT_PTR, 10> key{reinterpret_cast<INT_PTR>(emu),
+                                monitor.work.left,
+                                monitor.work.top,
+                                monitor.work.right,
+                                monitor.work.bottom,
+                                monitor.dpi,
+                                renderW,
+                                renderH,
+                                requestedPercent,
+                                (showBar ? 1 : 0) | (nativeControls ? 2 : 0) | (leftDock ? 4 : 0)};
+    if (key == fitApplied)
+        return;
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetGUIThreadInfo(GetWindowThreadProcessId(emu, nullptr), &info) && (info.flags & GUI_INMOVESIZE)) {
+        fitAfter = GetTickCount64() + 350;
+        return;
+    }
+    if (key != fitPending || !EqualRect(&fitGeometry, &window)) {
+        fitPending = key;
+        fitGeometry = window;
+        fitAfter = GetTickCount64() + 350;
+        return;
+    }
+    if (GetTickCount64() < fitAfter)
+        return;
+    int toolbar = showBar ? int(std::lround(61 * monitor.dpi / 96.f)) : 0;
+    if (nativeControls && stockBar && IsWindowVisible(stockBar)) {
+        RECT native{};
+        if (GetWindowRect(stockBar, &native))
+            toolbar += native.right - native.left + MulDiv(7, monitor.dpi, 96);
+    }
+    // Skin borders scale with the viewport; native caption/borders use physical DPI.
+    RECT frame = scaling::outer(emu, 0, 0, monitor.dpi);
+    int frameW = std::max(0L, frame.right - frame.left), frameH = std::max(0L, frame.bottom - frame.top);
+    double ratioW = std::max(1.0, double(window.right - window.left - frameW) / screenW);
+    double ratioH = std::max(1.0, double(window.bottom - window.top - frameH) / screenH);
+    int availableW = std::max(1, int((monitor.width() - toolbar - frameW) / ratioW));
+    int availableH = std::max(1, int((monitor.height() - frameH) / ratioH));
+    int percent = scaling::phone(availableW, availableH, renderW, renderH, requestedPercent);
+    int width = int(std::lround(renderW * percent / 100.0 * ratioW)) + frameW;
+    int height = int(std::lround(renderH * percent / 100.0 * ratioH)) + frameH;
+    int leftSpace = leftDock && showBar ? int(std::lround(61 * monitor.dpi / 96.f)) : 0;
+    RECT anchor = window;
+    anchor.left -= leftSpace;
+    auto position = scaling::position(anchor, monitor, width + toolbar, height);
+    position.x += leftSpace;
+    fitApplied = key;
+    if (std::abs(window.right - window.left - width) > 2 || std::abs(window.bottom - window.top - height) > 2 ||
+        window.left != position.x || window.top != position.y)
+        SetWindowPos(emu, nullptr, position.x, position.y, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+}
+
 } // namespace
+
+void windowScale(int percent) {
+    percent = scaling::preference(percent, 10, 100);
+    if (percent != requestedPercent) {
+        requestedPercent = percent;
+        fitApplied = {};
+    }
+}
+int windowPercent() {
+    return state == State::Running && IsWindow(emu) ? effectivePercent : 0;
+}
 
 std::wstring keyName(int key) {
     if (key >= 256 && key < 256 + controllers::Count) {
@@ -1536,6 +1631,7 @@ void tick() {
         release();
         return;
     }
+    fitPhoneWindow();
     if (nativeControls && stockBar && !IsWindowVisible(stockBar))
         ShowWindowAsync(stockBar, SW_SHOWNOACTIVATE);
     RECT r;
@@ -1553,11 +1649,6 @@ void tick() {
         mapped = current.enabled && !editingNow;
     }
     manageHooks(mapped);
-    if (editor) {
-        RECT client;
-        GetClientRect(display, &client);
-        SetWindowPos(editor, HWND_TOP, 0, 0, client.right, client.bottom, SWP_NOACTIVATE);
-    }
     if (!showBar) {
         if (bar)
             ShowWindow(bar, SW_HIDE);
@@ -1595,7 +1686,11 @@ void tick() {
             x = std::clamp<int>(x, mi.rcWork.left, std::max<LONG>(mi.rcWork.left, mi.rcWork.right - width));
         }
     }
-    SetWindowPos(bar, emu, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    RECT previous{};
+    GetWindowRect(bar, &previous);
+    if (!IsWindowVisible(bar) || previous.left != x || previous.top != y || previous.right - previous.left != width ||
+        previous.bottom - previous.top != height)
+        SetWindowPos(bar, emu, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     static std::wstring tooltipLayout;
     std::wstring nextLayout = std::to_wstring(width) + L":" + std::to_wstring(height) + L":" + (collapsed ? L"1" : L"0");
     nextLayout += recording() ? L":recording" : L":idle";
@@ -1640,9 +1735,11 @@ void tick() {
         ShowWindowAsync(stockBar, SW_HIDE);
     }
     if (editor) {
-        RECT client;
+        RECT client{}, previous{};
         GetClientRect(display, &client);
-        SetWindowPos(editor, HWND_TOP, 0, 0, client.right, client.bottom, SWP_NOACTIVATE);
+        GetClientRect(editor, &previous);
+        if (client.right != previous.right || client.bottom != previous.bottom)
+            SetWindowPos(editor, HWND_TOP, 0, 0, client.right, client.bottom, SWP_NOACTIVATE);
     }
 }
 void toolbarVisible(bool on) {
@@ -1718,6 +1815,7 @@ void toggleFullscreen() {
         SetWindowPlacement(emu, &oldPlacement);
         SetWindowPos(emu, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         isFullscreen = false;
+        fitApplied = {};
     } else {
         oldStyle = GetWindowLongPtrW(emu, GWL_STYLE);
         GetWindowPlacement(emu, &oldPlacement);

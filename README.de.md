@@ -1,10 +1,10 @@
 <p align="center"><img src="docs/assets/velox-banner.png" alt="Velox — Deine Spiele. Dein Handy. Dein Platz." width="100%"></p>
 
-<p align="center"><a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/Velox-Setup-2.5.0.exe"><b>Windows-Installer herunterladen</b></a> &nbsp;·&nbsp; <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/Velox-2.5.0.zip"><b>Portable ZIP herunterladen</b></a> &nbsp;·&nbsp; <a href="README.md">English</a></p>
+<p align="center"><a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.6.0/Velox-Setup-2.6.0.exe"><b>Windows-Installer herunterladen</b></a> &nbsp;·&nbsp; <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.6.0/Velox-2.6.0.zip"><b>Portable ZIP herunterladen</b></a> &nbsp;·&nbsp; <a href="README.md">English</a></p>
 
 > [!IMPORTANT]
 > **Windows-Herausgeberwarnung:** `Velox.exe` und der Installer sind derzeit **nicht signiert**. Windows kann **„Unbekannter Herausgeber“** oder **„Der Computer wurde durch Windows geschützt“** anzeigen.
-> Prüfe vor dem Öffnen den SHA-256-Wert anhand der [SHA256SUMS.txt aus derselben Version](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.5.0/SHA256SUMS.txt). Hier findest du die [Anleitung zur Dateiprüfung und zur Windows-Warnung](docs/VERIFY-DOWNLOADS.de.md).
+> Prüfe vor dem Öffnen den SHA-256-Wert anhand der [SHA256SUMS.txt aus derselben Version](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.6.0/SHA256SUMS.txt). Hier findest du die [Anleitung zur Dateiprüfung und zur Windows-Warnung](docs/VERIFY-DOWNLOADS.de.md).
 
 <details>
 <summary>Vor der Installation prüfen (PowerShell)</summary>
@@ -14,13 +14,13 @@ Lade die Datei und `SHA256SUMS.txt` aus demselben offiziellen Release herunter. 
 Installer:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-Setup-2.5.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-Setup-2.6.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Portable ZIP:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-2.5.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-2.6.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Vergleiche alle 64 Zeichen unter `Hash` mit der Zeile für genau diesen Dateinamen in `SHA256SUMS.txt`. Groß- und Kleinschreibung sind dabei egal. Bei einer Abweichung darfst du die Datei nicht öffnen oder installieren. Ein Treffer bestätigt die Übereinstimmung mit dem veröffentlichten Release; er bestätigt weder die Unbedenklichkeit noch einen verifizierten Herausgeber.
@@ -31,7 +31,9 @@ Wenn du Quelle und Prüfsumme geprüft hast und fortfahren möchtest, kannst du 
 
 Velox ist ein quelloffenes Android-Gaming-Handy für Windows. Ein echtes Android 15 mit Google Play trifft auf eine eigene Desktop-Oberfläche mit Spielebibliothek, Tastatur- und Mausbelegung, Controller-Unterstützung, mehreren unabhängigen Handys und Wiederherstellung.
 
-### Loslegen
+#Die automatische Fensterskalierung hält die Oberfläche gut lesbar und passt das Handy an den aktuellen Bildschirm an. Unter **Anzeige → Fensterskalierung** stehen Auto und unabhängige Prozentwerte bereit. [Anleitung zur Skalierung](docs/DISPLAY-SCALING.de.md).
+
+## Loslegen
 
 1. Lade den Installer oder die portable ZIP herunter und [prüfe die Datei vor dem Öffnen](docs/VERIFY-DOWNLOADS.de.md). Installiere Velox anschließend für dein Windows-Konto oder entpacke die ZIP in einen beschreibbaren Ordner.
 2. Öffne Velox, wähle Deutsch oder Englisch und akzeptiere die SDK-Bedingungen von Google. Android wird automatisch heruntergeladen und eingerichtet.

@@ -20,7 +20,8 @@ enum Action {
     Power,
     EnableMapping,
     FocusPhone,
-    ScreenResolution
+    ScreenResolution,
+    WindowScaling
 };
 enum class Kind { Tap, Stick, Swipe, Aim, PadLeft, PadRight };
 struct Binding {
@@ -39,6 +40,8 @@ struct Profile {
 };
 void initialize(HWND launcher);
 void tick();
+void windowScale(int percent);
+int windowPercent(); // currently displayed Android render size as a percentage
 void shutdown();
 void pollPhone();
 void selectProfile(const std::wstring &package, bool landscape);

@@ -10,7 +10,7 @@ The Windows installer and `Velox.exe` currently have **no Authenticode publisher
 
 Use the release page at **https://github.com/NeTriXoN-BoT/velox/releases**. Check the account and repository name before downloading.
 
-For version **2.5.0**, choose `Velox-Setup-2.5.0.exe` or `Velox-2.5.0.zip`. Download **SHA256SUMS.txt from that same release**. Open that text file in Notepad; each line contains a SHA-256 value followed by its filename. The matching `.sha256` sidecar is an alternative for the installer or ZIP.
+For version **2.6.0**, choose `Velox-Setup-2.6.0.exe` or `Velox-2.6.0.zip`. Download **SHA256SUMS.txt from that same release**. Open that text file in Notepad; each line contains a SHA-256 value followed by its filename. The matching `.sha256` sidecar is an alternative for the installer or ZIP.
 
 For another version, use that version's filenames and checksum file. GitHub's automatic **Source code** archives are for building the project, not the portable app download.
 
@@ -21,13 +21,13 @@ Open the download folder in File Explorer. Type `powershell` in its address bar 
 For the **installer**, run:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-Setup-2.5.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-Setup-2.6.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 For the **portable ZIP**, run:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-2.5.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-2.6.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Run only the command for your downloaded file. These commands read the file; they do not run the installer or app. `Format-List` displays the complete hash rather than a shortened table column.

@@ -212,3 +212,10 @@ and delivered through Velox releases.
 
 Project, source, downloads and issue tracker:
 https://github.com/NeTriXoN-BoT/velox
+
+Automatic window scaling is enabled for desktop Velox and the phone window.
+Display > Window scaling (also in System and the toolbar right-click menu)
+lets you choose independent percentages. Oversized choices fit the desktop;
+the applied value is shown. Phone percentages use Android's render resolution.
+Android resolution/density and game render quality stay independent. There is
+no restart required. Native text fields and Velox dialogs follow the UI scale.

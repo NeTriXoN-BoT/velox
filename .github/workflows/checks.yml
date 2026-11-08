@@ -20,3 +20,7 @@ jobs:
         run: |
           g++ -std=c++20 -Wall -Wextra -Werror -I src tools/dev/orientation-test.cpp -o /tmp/velox-orientation-test
           /tmp/velox-orientation-test
+      - name: Build and run display scaling tests
+        run: |
+          g++ -std=c++20 -Wall -Wextra -Werror -I src tools/dev/scaling-test.cpp -o /tmp/velox-scaling-test
+          /tmp/velox-scaling-test

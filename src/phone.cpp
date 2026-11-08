@@ -1,4 +1,5 @@
 #include "phone.hpp"
+#include "display_scale.hpp"
 
 #include <dxgi.h>
 #include <softpub.h>
@@ -510,6 +511,8 @@ void loadFrom(Settings &s, const wchar_t *sec) {
     if (s.backgroundRate != 15 && s.backgroundRate != 30 && s.backgroundRate != 60)
         s.backgroundRate = 0;
     s.backgroundMute = rb(L"backgroundmute", false);
+    s.uiPercent = scaling::preference(readIntIn(sec, L"uiscale", 0), 75, 300);
+    s.phonePercent = scaling::preference(readIntIn(sec, L"phonescale", 0), 10, 100);
     if (!validPhoneNumber(s.number))
         s.number.clear();
 }
@@ -541,6 +544,8 @@ void saveTo(const Settings &s, const wchar_t *sec) {
     writeStr(sec, L"language", std::to_wstring(s.language));
     writeStr(sec, L"backgroundfps", std::to_wstring(s.backgroundRate));
     writeStr(sec, L"backgroundmute", b(s.backgroundMute));
+    writeStr(sec, L"uiscale", std::to_wstring(s.uiPercent));
+    writeStr(sec, L"phonescale", std::to_wstring(s.phonePercent));
 }
 
 } // namespace

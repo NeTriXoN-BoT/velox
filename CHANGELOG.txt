@@ -1,3 +1,13 @@
+2.6.0 | 2026-11-08
+[New]
+- Automatic desktop UI scaling with percentage overrides and a dedicated English/German scaling view.
+- Automatic phone-window fitting with independent percentage choices, accessible from the phone toolbar.
+[Improved]
+- Windows, native text fields and Velox dialogs redraw sharply for the effective scale and fit the desktop work area.
+- Phone fitting follows rotation and monitor changes while leaving manual movement, Android resolution and full-screen play independent.
+[Fixed]
+- High-DPI and small-screen launcher sizing accounts for the real caption, taskbar and desktop margins.
+
 2.5.0 | 2026-11-07
 [New]
 - Phone management with custom names, fresh settings/layout templates and verified full cold clones.

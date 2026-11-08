@@ -4,6 +4,7 @@ Velox is a native Windows launcher around Google's Android Emulator. It does not
 
 | Area | Source |
 | :-- | :-- |
+| Monitor fitting and independent window percentages | `src/display_scale.hpp`, `src/window_scale.hpp` |
 | Desktop UI and settings flow | `src/main.cpp`, `src/localization.*` |
 | Settings, host detection and owned phone lifecycle | `src/phone.*` |
 | First-run verified downloads and AVD setup | `src/setup.*`, `src/net.*` |

@@ -1,4 +1,5 @@
 #include "studio.hpp"
+#include "window_scale.hpp"
 #include "art.hpp"
 #include "presets.hpp"
 #include "playtools.hpp"
@@ -50,6 +51,35 @@ struct Window {
         auto display = i18n::tr(message);
         graphics.MeasureString(display.c_str(), -1, &font, gp::RectF(0, 0, 624, 1000), &format, &measured);
         bodyHeight = std::clamp(int(measured.Height + 20), 113, 360);
+    }
+    void layout(const RECT *suggested = nullptr) {
+        if (!hwnd)
+            return;
+        auto screen = scaling::desktop(hwnd, suggested);
+        auto frame = scaling::outer(hwnd, 0, 0, screen.dpi);
+        int percent = scaling::fit(screen.width() - (frame.right - frame.left), screen.height() - (frame.bottom - frame.top), 720, height(),
+                                   int(std::lround(scaling::ownerScale(owner, screen.dpi, screen.height()) * 100)));
+        scale = percent / 100.f;
+        RECT current{};
+        GetWindowRect(hwnd, &current);
+        auto bounds = scaling::outer(hwnd, int(std::lround(720 * scale)), int(std::lround(height() * scale)), screen.dpi);
+        int width = bounds.right - bounds.left, h = bounds.bottom - bounds.top;
+        auto position = scaling::position(suggested ? *suggested : current, screen, width, h);
+        SetWindowPos(hwnd, nullptr, position.x, position.y, width, h, SWP_NOACTIVATE | SWP_NOZORDER);
+        if (edit) {
+            HFONT next = CreateFontW(-int(std::lround(16 * scale)), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            if (next) {
+                SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(next), TRUE);
+                if (editFont)
+                    DeleteObject(editFont);
+                editFont = next;
+            }
+            SetWindowPos(edit, nullptr, int(std::lround(44 * scale)), int(std::lround(209 * scale)), int(std::lround(628 * scale)),
+                         int(std::lround(26 * scale)), SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        hover = pressed = -1;
+        InvalidateRect(hwnd, nullptr, FALSE);
     }
     void text(gp::Graphics &g, const std::wstring &s, float x, float y, float w, float h, float size = 13, gp::ARGB color = C_TEXT,
               bool bold = false, bool centered = false, bool raw = false) {
@@ -373,6 +403,17 @@ LRESULT CALLBACK procedure(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
     }
+    case WM_DPICHANGED:
+        c->layout(reinterpret_cast<RECT *>(l));
+        return 0;
+    case WM_DISPLAYCHANGE:
+    case WM_EXITSIZEMOVE:
+        c->layout();
+        return 0;
+    case WM_SETTINGCHANGE:
+        if (w == SPI_SETWORKAREA)
+            c->layout();
+        break;
     case WM_TIMER:
         if (c->reader)
             c->reader->read(c->pad.padDevice, c->pad.padLayout);
@@ -466,8 +507,13 @@ void open(Window *c) {
     monitor.cbSize = sizeof(monitor);
     GetMonitorInfoW(MonitorFromWindow(c->owner, MONITOR_DEFAULTTONEAREST), &monitor);
     auto work = monitor.rcWork;
-    c->scale = std::min({dpi / 96.f, (work.right - work.left - 40) / 720.f, (work.bottom - work.top - 70) / float(c->height())});
-    c->scale = std::max(.65f, c->scale);
+    RECT chrome{0, 0, 0, 0};
+    AdjustWindowRectExForDpi(&chrome, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME, dpi);
+    int pad = MulDiv(24, dpi, 96);
+    c->scale = scaling::fit(work.right - work.left - pad - (chrome.right - chrome.left),
+                            work.bottom - work.top - pad - (chrome.bottom - chrome.top), 720, c->height(),
+                            int(std::lround(scaling::ownerScale(c->owner, dpi, work.bottom - work.top - pad) * 100))) /
+               100.f;
     RECT r{0, 0, int(720 * c->scale), int(c->height() * c->scale)};
     AdjustWindowRectExForDpi(&r, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME, dpi);
     RECT parent{};
