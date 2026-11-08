@@ -21,7 +21,9 @@ enum Action {
     EnableMapping,
     FocusPhone,
     ScreenResolution,
-    WindowScaling
+    WindowScaling,
+    ClosePhoneView,
+    SystemMonitor
 };
 enum class Kind { Tap, Stick, Swipe, Aim, PadLeft, PadRight };
 struct Binding {
@@ -66,6 +68,7 @@ void toggleFullscreen();
 void setFullscreen(bool enabled);
 bool controller(const Profile &desired);
 void focusPhone();
+void closePhoneView();
 void toolbarVisible(bool on);
 bool toolbarVisible();
 std::wstring keyName(int key);

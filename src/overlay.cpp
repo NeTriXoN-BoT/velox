@@ -11,9 +11,11 @@ namespace phone::overlay {
 namespace {
 
 std::atomic<bool> g_bootBusy{false};
+std::atomic<bool> g_previewMode{false}, g_liveBootQueued{false};
 
 struct EmuWindows {
     HWND main = nullptr, display = nullptr;
+    uint64_t score = 0;
 };
 
 EmuWindows findEmuWindows(DWORD pid) {
@@ -41,12 +43,19 @@ EmuWindows findEmuWindows(DWORD pid) {
                     wchar_t cls[64] = L"";
                     GetClassNameW(ch, cls, 64);
                     if (wcscmp(cls, L"subWin") == 0) {
-                        *reinterpret_cast<HWND *>(p2) = ch;
-                        return FALSE;
+                        auto *found = reinterpret_cast<EmuWindows *>(p2);
+                        RECT bounds{};
+                        if (GetClientRect(ch, &bounds) && bounds.right >= 60 && bounds.bottom >= 60) {
+                            uint64_t score = uint64_t(bounds.right) * bounds.bottom + (IsWindowVisible(ch) ? 1ull << 50 : 0);
+                            if (score > found->score) {
+                                found->display = ch;
+                                found->score = score;
+                            }
+                        }
                     }
                     return TRUE;
                 },
-                reinterpret_cast<LPARAM>(&c->found.display));
+                reinterpret_cast<LPARAM>(&c->found));
             return FALSE;
         },
         reinterpret_cast<LPARAM>(&ctx));
@@ -112,25 +121,26 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
     HWND hwnd = nullptr;
     EmuWindows emu;
     DWORD pid = 0;
-    ULONGLONG start = GetTickCount64(), lastLookup = 0;
+    ULONGLONG start = GetTickCount64(), lastLookup = 0, firstVisible = 0;
     float shownProgress = 0, fadeOutAt = -1;
     int w = 0, h = 0;
+    int childX = 0, childY = 0;
     std::unique_ptr<art::BootScreen> screenArt;
     HDC screenDC = GetDC(nullptr), mem = CreateCompatibleDC(screenDC);
     HBITMAP dib = nullptr;
     HGDIOBJ oldBmp = nullptr;
     void *bits = nullptr;
     FrameTimer pacer;
-    g_previewClose = false;
 
     for (;;) {
         ULONGLONG frameStart = GetTickCount64();
-        float t = (frameStart - start) / 1000.f;
+        float t = (frameStart - (firstVisible ? firstVisible : start)) / 1000.f;
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
             DispatchMessageW(&msg);
 
         RECT r{};
+        HWND targetHost = nullptr;
         bool target = false;
         if (preview) {
             RECT work;
@@ -142,23 +152,33 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
             r.bottom = r.top + ph;
             target = true;
         } else {
-            if (frameStart - lastLookup > 400 || !emu.display || !IsWindow(emu.display)) {
+            if (frameStart - lastLookup > (emu.display && !IsWindowVisible(emu.display) ? 120u : 400u) || !emu.display || !IsWindow(emu.display)) {
                 lastLookup = frameStart;
                 pid = emulatorPid();
                 emu = findEmuWindows(pid);
             }
-            target = emu.display && IsWindowVisible(emu.main) && !IsIconic(emu.main) && GetClientRect(emu.display, &r);
+            targetHost = emu.display;
+            while (targetHost && targetHost != emu.main && !IsWindowVisible(targetHost))
+                targetHost = GetParent(targetHost);
+            target = emu.display && targetHost && IsWindowVisible(targetHost) && IsWindowVisible(emu.main) &&
+                     !IsIconic(emu.main) && GetClientRect(emu.display, &r) && r.right >= 60 && r.bottom >= 60;
+            if (target && targetHost != emu.display)
+                MapWindowPoints(emu.display, targetHost, reinterpret_cast<POINT *>(&r), 2);
         }
 
+        if (target && !firstVisible) {
+            firstVisible = frameStart;
+            t = 0;
+        }
         // Progress follows the real boot, eased so it never jumps.
         float goal = preview ? std::min(1.f, t / 5.f) : boot.progress.load();
         shownProgress += (goal - shownProgress) * 0.10f;
         if (goal >= 1.f && shownProgress > 0.985f)
             shownProgress = 1.f;
-        bool finished = preview ? (t > 6.2f || g_previewClose) : ((boot.done && shownProgress >= 1.f) || !boot.active);
+        bool finished = preview ? (t > 6.2f || g_previewClose) : ((firstVisible && boot.done && shownProgress >= 1.f) || !boot.active);
         if (finished && fadeOutAt < 0)
             fadeOutAt = std::max(t, boot.resume && !preview ? 0.6f : 1.2f);
-        if (!preview && t > 300)
+        if (!preview && frameStart - start > 300000)
             break; // never stay up forever
         float fadeIn = std::min(1.f, t / 0.35f), fadeOut = fadeOutAt < 0 || t < fadeOutAt ? 1.f : 1.f - (t - fadeOutAt) / 0.45f;
         if (fadeOutAt >= 0 && t >= fadeOutAt + 0.45f)
@@ -171,6 +191,11 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
             pacer.waitUntil(frameStart + 30);
             continue;
         }
+        if (hwnd && (!IsWindow(hwnd) || (!preview && GetParent(hwnd) != targetHost))) {
+            if (IsWindow(hwnd))
+                DestroyWindow(hwnd);
+            hwnd = nullptr;
+        }
         if (!hwnd) {
             // A child moves with the display in the compositor, independently of rendering.
             // A desktop popup positioned using coordinates sampled before drawing visibly lags
@@ -178,16 +203,24 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
             DWORD ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (preview ? WS_EX_TOPMOST : WS_EX_TRANSPARENT);
             DPI_AWARENESS_CONTEXT oldDpi = nullptr;
             if (!preview)
-                oldDpi = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(emu.display));
-            hwnd = CreateWindowExW(ex, L"VeloxBootScreen", L"Velox", preview ? WS_POPUP : WS_CHILD, preview ? r.left : 0,
-                                   preview ? r.top : 0, 1, 1, preview ? nullptr : emu.display, nullptr, inst, nullptr);
+                oldDpi = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(targetHost));
+            hwnd = CreateWindowExW(ex, L"VeloxBootScreen", L"Velox", preview ? WS_POPUP : WS_CHILD, r.left,
+                                   r.top, 1, 1, preview ? nullptr : targetHost, nullptr, inst, nullptr);
             if (oldDpi)
                 SetThreadDpiAwarenessContext(oldDpi);
             if (!hwnd)
                 break;
+            childX = r.left;
+            childY = r.top;
         }
-        if (!IsWindow(hwnd))
-            break; // the emulator window went away
+        if (!IsWindow(hwnd)) {
+            // Qt can replace the display child during startup or a skin change.
+            // Reattach on the next frame instead of dropping the whole boot screen.
+            hwnd = nullptr;
+            emu = {};
+            lastLookup = 0;
+            continue;
+        }
         int W = r.right - r.left, H = r.bottom - r.top;
         if (W < 60 || H < 60) {
             pacer.waitUntil(frameStart + 30);
@@ -218,7 +251,7 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
             g.Clear(gp::Color(0, 0, 0, 0));
             if (round || preview) {
                 gp::GraphicsPath clip;
-                art::roundRectPath(clip, gp::RectF(0, 0, static_cast<float>(W), static_cast<float>(H)), W * 0.075f);
+                art::roundRectPath(clip, gp::RectF(0, 0, static_cast<float>(W), static_cast<float>(H)), std::min(W, H) * 0.075f);
                 g.SetClip(&clip);
             }
             std::wstring status = preview ? (t < 1.5f  ? i18n::text(L"Starting Android")
@@ -231,6 +264,17 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
         BLENDFUNCTION bf{AC_SRC_OVER, 0, static_cast<BYTE>(alpha * 255), AC_SRC_ALPHA};
         POINT pos{r.left, r.top}, zero{0, 0};
         SIZE size{W, H};
+        if (!preview) {
+            // Keep local coordinates. Sampling a screen rectangle and mapping
+            // it back after the parent moves introduces the same drag jitter
+            // this child window is meant to avoid.
+            if (childX != r.left || childY != r.top) {
+                SetWindowPos(hwnd, HWND_TOP, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                childX = r.left;
+                childY = r.top;
+            } else if (GetWindow(hwnd, GW_HWNDPREV))
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
         UpdateLayeredWindow(hwnd, screenDC, preview ? &pos : nullptr, &size, mem, &zero, 0, &bf, ULW_ALPHA);
         if (!IsWindowVisible(hwnd))
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -244,6 +288,7 @@ void runBootScreen(std::wstring subtitle, bool round, bool preview, int style) {
     }
     DeleteDC(mem);
     ReleaseDC(nullptr, screenDC);
+    g_previewMode = false;
     g_bootBusy = false;
 }
 
@@ -273,19 +318,39 @@ void markApplied(bool on) {
 } // namespace
 
 void showBootScreen(const std::wstring &subtitle, bool roundCorners, int style) {
-    if (g_bootBusy.exchange(true))
+    if (g_bootBusy.exchange(true)) {
+        if (!g_previewMode || g_liveBootQueued.exchange(true))
+            return;
+        g_previewClose = true;
+        std::thread([subtitle, roundCorners, style] {
+            for (int attempt = 0; attempt < 500 && boot.active; ++attempt) {
+                bool expected = false;
+                if (g_bootBusy.compare_exchange_strong(expected, true)) {
+                    g_previewMode = false;
+                    g_liveBootQueued = false;
+                    runBootScreen(subtitle, roundCorners, false, style);
+                    return;
+                }
+                Sleep(10);
+            }
+            g_liveBootQueued = false;
+        }).detach();
         return;
+    }
+    g_previewMode = false;
     std::thread(runBootScreen, subtitle, roundCorners, false, style).detach();
 }
 
 void previewBootScreen(int style) {
-    if (g_bootBusy.exchange(true))
+    if (g_liveBootQueued || g_bootBusy.exchange(true))
         return;
+    g_previewClose = false;
+    g_previewMode = true;
     std::thread(runBootScreen, std::wstring(L"PREVIEW  ·  FULL HD+  ·  120 HZ"), true, true, style).detach();
 }
 
 bool bootScreenVisible() {
-    return g_bootBusy;
+    return g_bootBusy || g_liveBootQueued;
 }
 
 void setCursorStyle(int style) {
@@ -305,7 +370,7 @@ void tickCursor() {
         return;
     ULONGLONG now = GetTickCount64();
     if (now - g_pidTime > 1500) {
-        g_pidCache = emulatorPid();
+        g_pidCache = cachedEmulatorPid();
         g_pidTime = now;
     }
     bool over = false;

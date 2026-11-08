@@ -48,6 +48,7 @@ final class Strings {
         DE.put("Remove from favorites", "Aus Favoriten entfernen");
         DE.put("Reversed buttons need Root and an initial phone restart. Your apps keep their normal direction.", "Die umgekehrte Tastenreihenfolge benötigt Root und einen einmaligen Handyneustart. Apps behalten ihre normale Ausrichtung.");
         DE.put("Search your games and apps", "Deine Spiele und Apps suchen");
+        DE.put("Search apps", "Apps suchen");
         DE.put("Settings", "Einstellungen");
         DE.put("Show clock and date", "Uhr und Datum anzeigen");
         DE.put("Sound and volume", "Ton und Lautstärke");

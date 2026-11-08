@@ -1,14 +1,16 @@
 <p align="center"><img src="docs/assets/velox-banner.png" alt="Velox — Your games. Your phone. Your space." width="100%"></p>
 
 <p align="center">
-  <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.6.0/Velox-Setup-2.6.0.exe"><img src="docs/assets/download-installer.svg" alt="Download Windows installer" height="46"></a>
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.7.0/Velox-Setup-2.7.0.exe"><img src="docs/assets/download-installer.svg" alt="Download Windows installer" height="46"></a>
   &nbsp;
-  <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.6.0/Velox-2.6.0.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/download/v2.7.0/Velox-2.7.0.zip"><img src="docs/assets/download-portable.svg" alt="Download portable ZIP" height="46"></a>
+  &nbsp;
+  <a href="https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-linux-x86_64.AppImage"><img src="docs/assets/download-linux.svg" alt="Download Linux AppImage" height="46"></a>
 </p>
 
 > [!IMPORTANT]
 > **Windows publisher warning:** `Velox.exe` and the installer are currently **unsigned**. Windows may show **“Unknown publisher”** or **“Windows protected your PC.”**
-> Before opening a download, check its SHA-256 against [SHA256SUMS.txt from the same release](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.6.0/SHA256SUMS.txt). Follow the [verification and Windows warning guide](docs/VERIFY-DOWNLOADS.md) ([Deutsch](docs/VERIFY-DOWNLOADS.de.md)).
+> Before opening a download, check its SHA-256 against [SHA256SUMS.txt from the same release](https://github.com/NeTriXoN-BoT/velox/releases/download/v2.7.0/SHA256SUMS.txt). Follow the [verification and Windows warning guide](docs/VERIFY-DOWNLOADS.md) ([Deutsch](docs/VERIFY-DOWNLOADS.de.md)).
 
 <details>
 <summary>Quick check before installing (PowerShell)</summary>
@@ -18,13 +20,13 @@ Download the file and `SHA256SUMS.txt` from the same official release. Open Powe
 Installer:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-Setup-2.6.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-Setup-2.7.0.exe' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Portable ZIP:
 
 ```powershell
-Get-FileHash -LiteralPath '.\Velox-2.6.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
+Get-FileHash -LiteralPath '.\Velox-2.7.0.zip' -Algorithm SHA256 | Format-List Algorithm,Hash
 ```
 
 Compare all 64 characters in `Hash` with the line for that filename in `SHA256SUMS.txt`; upper/lowercase does not matter. If they differ, do not open or install the file. A match confirms that it matches the published release; it does not certify that software is safe or provide a verified publisher.
@@ -32,6 +34,8 @@ Compare all 64 characters in `Hash` with the line for that filename in `SHA256SU
 After checking the source and hash, if you choose to proceed and SmartScreen offers it, select **More info → Run anyway**. Do not disable Windows protection or bypass an administrator's policy. Stop if antivirus reports a specific threat. [Full instructions](docs/VERIFY-DOWNLOADS.md).
 
 </details>
+
+**Linux:** use the [AppImage setup guide](docs/LINUX.md), including SHA-256 verification, KVM access, X11/Wayland requirements and the extraction fallback. It targets modern glibc x86-64 desktops. The [corresponding library sources](https://github.com/NeTriXoN-BoT/velox/releases/latest/download/Velox-linux-corresponding-source.tar) are available separately for rebuilding.
 
 <p align="center">
   <a href="https://github.com/NeTriXoN-BoT/velox/releases"><img alt="Release" src="https://img.shields.io/github/v/release/NeTriXoN-BoT/velox?color=8864ff&label=release"></a>
@@ -42,9 +46,9 @@ After checking the source and hash, if you choose to proceed and SmartScreen off
 
 <p align="center"><b>English · <a href="README.de.md">Deutsch</a></b> &nbsp;|&nbsp; <a href="docs/BUILD.md">Build from source</a> &nbsp;|&nbsp; <a href="CHANGELOG.txt">Changelog</a> &nbsp;|&nbsp; <a href="https://github.com/NeTriXoN-BoT/velox/issues">Report an issue</a></p>
 
-Velox is an open-source Android gaming workspace for Windows. It brings a real Android 15 phone with Google Play into a custom desktop interface, with a game library, input mapping, controllers, independent phones and recovery tools.
+Velox is an open-source Android gaming workspace for Windows and Linux. It brings a real Android 15 phone with Google Play into a custom desktop interface, with a game library, input mapping, controllers, independent phones and recovery tools.
 
-The launcher is native C++ and Win32. Android components download directly from Google after you accept the SDK terms. No separate SDK installation is needed for playing.
+Windows uses a native C++/Win32 launcher; Linux uses a Qt interface with an OpenGL phone view. Android components download directly from Google after you accept the SDK terms. No separate SDK installation is needed for playing. See [platform performance](docs/PLATFORM-PERFORMANCE.md) and [Linux builds](docs/LINUX-BUILD.md).
 
 #Automatic window scaling keeps the desktop controls readable and fits the phone to the current monitor. Choose **Display → Window scaling** for Auto or independent percentage overrides. [Scaling guide](docs/DISPLAY-SCALING.md).
 

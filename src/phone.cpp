@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -24,6 +25,7 @@
 #include "net.hpp"
 #include "orientation.hpp"
 #include "instances.hpp"
+#include "experience.hpp"
 
 namespace phone {
 
@@ -50,6 +52,13 @@ std::atomic<bool> g_autoRotation{true};
 std::atomic<unsigned> g_rotationGeneration{0};
 std::mutex g_rotationLock;
 std::atomic<int> g_navigationMode{0}; // Back/Home/Recents, Recents/Home/Back, gestures
+std::atomic<bool> g_boostWanted{false};
+std::atomic<int> g_engineRate{144};
+std::atomic<bool> g_autoSoftware{false};
+std::mutex g_graphicsLock;
+GraphicsInfo g_graphics;
+std::atomic<int> g_observedRotation{-1};
+std::atomic<DWORD> g_observedPid{0};
 std::atomic<bool> g_navigationRestart{false};
 
 // Magisk, pinned to the release root was tested with.
@@ -295,10 +304,14 @@ HostInfo host() {
 }
 
 void refreshHost(HWND window) {
-    host();
+    auto next = host();
+    detectMonitor(next, window);
+    detectDisk(next);
     std::lock_guard<std::mutex> l(g_hostLock);
-    detectMonitor(g_host, window);
-    detectDisk(g_host);
+    g_host.monitorHz = next.monitorHz;
+    g_host.monitorW = next.monitorW;
+    g_host.monitorH = next.monitorH;
+    g_host.freeDiskGB = next.freeDiskGB;
 }
 
 std::wstring hostSummary() {
@@ -335,11 +348,21 @@ int memoryFor(const Settings &s) {
                 resolved = n;
         return resolved;
     }
-    return r <= 6 ? 2 : r <= 8 ? 3 : r <= 12 ? 4 : r <= 16 ? 6 : 8;
+    int automatic = r <= 6 ? 2 : r <= 8 ? 3 : r <= 12 ? 4 : r <= 16 ? 6 : 8;
+    if (host().softwareGpu || host().vramMB < 2048)
+        automatic = std::min(automatic, r <= 12 ? 3 : 4);
+    return automatic;
 }
 
 bool coreAllowed(int c) {
     return c == 0 || (std::find(coreChoices().begin(), coreChoices().end(), c) != coreChoices().end() && c <= cpuLimit());
+}
+int memoryMiB(const Settings &s) {
+    // Android 15's engine raises the legacy 2 GB choice to 2560 MiB.
+    return std::max(2560, memoryFor(s) * 1024);
+}
+std::wstring memoryLabel(int choice) {
+    return choice == 2 ? (i18n::language() == 1 ? L"2,5" : L"2.5") : std::to_wstring(choice);
 }
 bool memoryAllowed(int gb) {
     return gb == 0 || (std::find(memoryChoices().begin(), memoryChoices().end(), gb) != memoryChoices().end() &&
@@ -372,14 +395,20 @@ Settings settingsForHardware(const HostInfo &h, int cpuBudget, int ramBudget, in
     const bool constrained = h.softwareGpu || threads <= 4 || h.ramGB <= 8 || targetCpu <= 2 || targetRam <= 3;
     const int shortEdge = std::min(h.monitorW, h.monitorH);
     s.display = constrained || shortEdge < 900 ? 0 : 2;
-    int ceiling = h.softwareGpu ? 30 : constrained ? 60 : !dedicated ? 90 : h.vramMB < 6000 || threads < 12 || targetRam < 6 ? 120 : 144;
+    int ceiling = h.softwareGpu ? 30 : constrained ? 60 : !dedicated ? 90 : std::abs(h.monitorHz - 144) <= 2 ? 144 : 120;
     // Never run above the display's current refresh rate. The 2 Hz tolerance
     // handles modes Windows reports as 59/119/143 Hz.
     s.rate = 30;
     for (int hz : refreshRates())
         if (hz <= ceiling && hz <= std::max(30, h.monitorHz) + 2)
             s.rate = hz;
-    s.gpu = h.softwareGpu ? GPU_SOFTWARE : GPU_HOST;
+    // A divisor such as 120 on a 240 Hz monitor gives even presentation timing.
+    // Keep faster/non-divisor rates available as explicit per-game choices.
+    for (int hz : refreshRates())
+        if (hz <= ceiling && hz <= std::max(30, h.monitorHz) + 2 &&
+            std::abs(h.monitorHz / double(hz) - std::round(h.monitorHz / double(hz))) < .025)
+            s.rate = hz;
+    s.gpu = h.softwareGpu ? GPU_SOFTWARE : GPU_AUTO;
     s.boost = threads >= 8 && cpuLimit >= 4;
     s.snappy = true;
     s.quickBoot = false;
@@ -576,7 +605,7 @@ std::wstring gpuMode(const Settings &s) {
         return L"swiftshader";
     if (s.gpu == GPU_HOST)
         return host().softwareGpu ? L"swiftshader" : L"host";
-    return host().softwareGpu ? L"swiftshader" : L"host";
+    return host().softwareGpu ? L"swiftshader" : L"auto";
 }
 
 std::wstring signature(const Settings &s) {
@@ -914,11 +943,12 @@ std::vector<Proc> processList() {
 }
 
 uint64_t creationTime(DWORD pid) {
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
     if (!h)
         return 0;
     FILETIME c, e, k, u;
-    uint64_t t = GetProcessTimes(h, &c, &e, &k, &u) ? (static_cast<uint64_t>(c.dwHighDateTime) << 32 | c.dwLowDateTime) : 0;
+    uint64_t t = WaitForSingleObject(h, 0) == WAIT_TIMEOUT && GetProcessTimes(h, &c, &e, &k, &u)
+                     ? (static_cast<uint64_t>(c.dwHighDateTime) << 32 | c.dwLowDateTime) : 0;
     CloseHandle(h);
     return t;
 }
@@ -929,9 +959,11 @@ uint64_t creationTime(DWORD pid) {
 struct Found {
     DWORD qemu = 0, wrapper = 0;
     int port = 0;
+    uint64_t born = 0;
 };
 std::mutex g_scanLock;
 Found g_found;
+std::atomic<std::shared_ptr<const Found>> g_fastFound{std::make_shared<const Found>()};
 ULONGLONG g_scanTime = 0;
 DWORD g_launchedPid = 0; // emulator.exe started by this Velox
 DWORD g_wrapperPid = 0;  // the emulator.exe wrapper of our phone, for cleanup
@@ -954,6 +986,13 @@ Found scan(bool fresh = false) {
     std::lock_guard<std::mutex> l(g_scanLock);
     ULONGLONG now = GetTickCount64();
     if (!fresh && now - g_scanTime < 250)
+        return g_found;
+    if (!fresh && g_found.qemu && g_found.port == instances::port() && g_found.born &&
+        creationTime(g_found.qemu) == g_found.born) {
+        g_scanTime = now;
+        return g_found;
+    }
+    if (!fresh && !g_found.qemu && state == State::Stopped && now - g_scanTime < 1000)
         return g_found;
     Found f;
     std::vector<Proc> procs = processList();
@@ -1012,7 +1051,10 @@ Found scan(bool fresh = false) {
         if (f.port > 0)
             g_port = f.port;
     }
+    if (f.qemu)
+        f.born = creationTime(f.qemu);
     g_found = f;
+    g_fastFound.store(std::make_shared<const Found>(f));
     g_scanTime = now;
     return f;
 }
@@ -1079,17 +1121,42 @@ void hardKill() {
 }
 
 std::string readLog() {
-    std::ifstream in{std::filesystem::path(g_paths.log), std::ios::binary};
-    in.seekg(0, std::ios::end);
-    auto size = in.tellg();
-    if (size <= 0)
+    HANDLE input = CreateFileW(g_paths.log.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (input == INVALID_HANDLE_VALUE)
         return {};
-    auto count = static_cast<std::streamoff>(std::min<std::streamoff>(size, 8 << 20));
-    in.seekg(size - count);
-    std::string text(static_cast<size_t>(count), '\0');
-    in.read(text.data(), count);
-    text.resize(static_cast<size_t>(in.gcount()));
+    BY_HANDLE_FILE_INFORMATION info{};
+    LARGE_INTEGER size{}, offset{};
+    bool valid = GetFileType(input) == FILE_TYPE_DISK && GetFileInformationByHandle(input, &info) &&
+                 !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+                 info.nNumberOfLinks == 1 && GetFileSizeEx(input, &size) && size.QuadPart > 0;
+    if (!valid) {
+        CloseHandle(input);
+        return {};
+    }
+    DWORD count = static_cast<DWORD>(std::min<LONGLONG>(size.QuadPart, 8 << 20)), read = 0;
+    offset.QuadPart = size.QuadPart - count;
+    std::string text(count, '\0');
+    valid = SetFilePointerEx(input, offset, nullptr, FILE_BEGIN) && ReadFile(input, text.data(), count, &read, nullptr);
+    CloseHandle(input);
+    text.resize(valid ? read : 0);
     return text;
+}
+
+HANDLE openLogForStart(SECURITY_ATTRIBUTES &attributes) {
+    HANDLE output = CreateFileW(g_paths.log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                &attributes, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (output == INVALID_HANDLE_VALUE)
+        return output;
+    BY_HANDLE_FILE_INFORMATION info{};
+    LARGE_INTEGER zero{};
+    if (GetFileType(output) != FILE_TYPE_DISK || !GetFileInformationByHandle(output, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || info.nNumberOfLinks != 1 ||
+        !SetFilePointerEx(output, zero, nullptr, FILE_BEGIN) || !SetEndOfFile(output)) {
+        CloseHandle(output);
+        return INVALID_HANDLE_VALUE;
+    }
+    return output;
 }
 
 // The last line the emulator flagged as a problem, made readable.
@@ -1169,7 +1236,7 @@ bool writeConfig(const Settings &s) {
         {"hw.lcd.density", std::to_string(d.dpi)},
         {"hw.lcd.vsync", std::to_string(s.rate)},
         {"hw.cpu.ncore", std::to_string(coresFor(s))},
-        {"hw.ramSize", std::to_string(memoryFor(s) * 1024)},
+        {"hw.ramSize", std::to_string(memoryMiB(s))},
         {"hw.gpu.enabled", "yes"},
         {"hw.gpu.mode", narrow(gpuMode(s))},
         {"hw.camera.back", "emulated"}, // the 3D "virtual scene" camera is slow to load
@@ -1198,25 +1265,136 @@ bool writeConfig(const Settings &s) {
         if (!found)
             lines.push_back(key + "=" + value);
     }
-    std::wstring tmp = path + L".new";
-    {
-        std::ofstream o(std::filesystem::path(tmp), std::ios::binary | std::ios::trunc);
-        for (auto &l : lines)
-            o << l << "\r\n";
-        if (!o)
-            return false;
-    }
-    return MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+    std::string contents;
+    for (const auto &line : lines)
+        contents += line + "\r\n";
+    return net::writeFile(path, contents.data(), contents.size());
 }
 
-void setPriority(bool boost) {
-    DWORD pid = scan().qemu;
-    if (!pid)
+namespace {
+std::mutex priorityLock;
+HANDLE priorityProcess = nullptr;
+DWORD priorityPid = 0;
+uint64_t priorityBirth = 0;
+bool priorityOverridden = false;
+bool priorityJournalChecked = false;
+
+void clearPriorityJournal() {
+    if (readStr(L"priority", L"pid") == std::to_wstring(priorityPid) &&
+        readStr(L"priority", L"birth") == std::to_wstring(priorityBirth))
+        WritePrivateProfileStringW(L"priority", nullptr, nullptr, iniPath().c_str());
+}
+
+bool rememberPriority() {
+    std::wstring data = L"pid=" + std::to_wstring(priorityPid);
+    data.push_back(L'\0');
+    data += L"birth=" + std::to_wstring(priorityBirth);
+    data.push_back(L'\0');
+    data += L"original=" + std::to_wstring(NORMAL_PRIORITY_CLASS);
+    data.push_back(L'\0');
+    data += L"applied=" + std::to_wstring(ABOVE_NORMAL_PRIORITY_CLASS);
+    data.push_back(L'\0');
+    if (!WritePrivateProfileSectionW(L"priority", data.c_str(), iniPath().c_str()))
+        return false;
+    // The all-null cache-flush form returns zero even when it succeeds.
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, iniPath().c_str());
+    return readStr(L"priority", L"pid") == std::to_wstring(priorityPid) &&
+           readStr(L"priority", L"birth") == std::to_wstring(priorityBirth) &&
+           readIntIn(L"priority", L"original", 0) == NORMAL_PRIORITY_CLASS &&
+           readIntIn(L"priority", L"applied", 0) == ABOVE_NORMAL_PRIORITY_CLASS;
+}
+
+void recoverPriority() {
+    const auto recordedPid = readStr(L"priority", L"pid");
+    if (recordedPid.empty())
         return;
-    if (HANDLE h = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid)) {
-        SetPriorityClass(h, boost ? ABOVE_NORMAL_PRIORITY_CLASS : NORMAL_PRIORITY_CLASS);
-        CloseHandle(h);
+    if (recordedPid == std::to_wstring(priorityPid) && readStr(L"priority", L"birth") == std::to_wstring(priorityBirth) &&
+        readIntIn(L"priority", L"original", 0) == NORMAL_PRIORITY_CLASS &&
+        readIntIn(L"priority", L"applied", 0) == ABOVE_NORMAL_PRIORITY_CLASS) {
+        HANDLE target = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, priorityPid);
+        if (!target) {
+            priorityJournalChecked = false;
+            return;
+        }
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (GetProcessTimes(target, &created, &exited, &kernel, &user) &&
+            (uint64_t(created.dwHighDateTime) << 32 | created.dwLowDateTime) == priorityBirth &&
+            GetPriorityClass(target) == ABOVE_NORMAL_PRIORITY_CLASS) {
+            priorityProcess = target;
+            return;
+        }
+        CloseHandle(target);
     }
+    // An old PID, a different birth time or a manual priority change owns no
+    // current process setting. Clear only the obsolete recovery marker.
+    WritePrivateProfileStringW(L"priority", nullptr, nullptr, iniPath().c_str());
+}
+
+void releasePriority(bool restore) {
+    if (priorityProcess) {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        bool released = true;
+        if (restore && GetProcessTimes(priorityProcess, &created, &exited, &kernel, &user) &&
+            (uint64_t(created.dwHighDateTime) << 32 | created.dwLowDateTime) == priorityBirth &&
+            GetPriorityClass(priorityProcess) == ABOVE_NORMAL_PRIORITY_CLASS)
+            released = SetPriorityClass(priorityProcess, NORMAL_PRIORITY_CLASS);
+        if (released)
+            clearPriorityJournal();
+        else
+            priorityJournalChecked = false;
+        CloseHandle(priorityProcess);
+        priorityProcess = nullptr;
+    }
+}
+
+void refreshPriority(bool boost) {
+    auto found = scan();
+    std::lock_guard<std::mutex> guard(priorityLock);
+    DWORD focus = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &focus);
+    if (priorityPid != found.qemu || priorityBirth != found.born) {
+        releasePriority(true);
+        priorityPid = found.qemu;
+        priorityBirth = found.born;
+        priorityOverridden = false;
+        priorityJournalChecked = false;
+    }
+    if (found.qemu && found.born && !priorityJournalChecked) {
+        priorityJournalChecked = true;
+        recoverPriority();
+    }
+    if (!boost || focus != found.qemu) {
+        releasePriority(true);
+        priorityOverridden = false;
+    }
+    if (!found.qemu || !found.born || !boost || focus != found.qemu || priorityOverridden)
+        return;
+    if (priorityProcess) {
+        if (GetPriorityClass(priorityProcess) != ABOVE_NORMAL_PRIORITY_CLASS) {
+            // A deliberate external priority change wins for this focus session.
+            releasePriority(false);
+            priorityOverridden = true;
+        }
+        return;
+    }
+    HANDLE target = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, found.qemu);
+    if (!target)
+        return;
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (GetProcessTimes(target, &created, &exited, &kernel, &user) &&
+        (uint64_t(created.dwHighDateTime) << 32 | created.dwLowDateTime) == found.born &&
+        GetPriorityClass(target) == NORMAL_PRIORITY_CLASS && rememberPriority() && SetPriorityClass(target, ABOVE_NORMAL_PRIORITY_CLASS)) {
+        priorityProcess = target;
+    } else {
+        CloseHandle(target);
+        clearPriorityJournal();
+        priorityOverridden = true;
+    }
+}
+} // namespace
+void setPriority(bool boost) {
+    g_boostWanted = boost;
+    refreshPriority(boost);
 }
 
 int lastBootSeconds() {
@@ -1238,6 +1416,54 @@ void rememberRunning(const Settings &s) {
 
 } // namespace
 
+GraphicsInfo parseGraphicsLog(const std::string &log) {
+    GraphicsInfo result;
+    std::istringstream lines(log);
+    for (std::string line; std::getline(lines, line);) {
+        auto pipe = line.find("| ");
+        if (pipe == std::string::npos)
+            continue;
+        auto field = trim(line.substr(pipe + 2));
+        for (auto item : {std::pair{"Graphics Adapter Vendor ", &result.vendor},
+                          std::pair{"Graphics API Version ", &result.api},
+                          std::pair{"Graphics Adapter ", &result.renderer}}) {
+            const std::string prefix = item.first;
+            if (!field.starts_with(prefix))
+                continue;
+            auto value = field.substr(prefix.size());
+            if (!value.empty() && value.size() <= 500 &&
+                std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }))
+                *item.second = widen(value);
+            break;
+        }
+    }
+    if (!result.renderer.empty()) {
+        auto renderer = lower(result.renderer);
+        result.mode = GraphicsMode::Hardware;
+        for (auto marker : {L"swiftshader", L"llvmpipe", L"lavapipe", L"softpipe", L"software rasterizer", L"microsoft basic render", L"gdi generic"})
+            if (renderer.find(marker) != std::wstring::npos)
+                result.mode = GraphicsMode::Software;
+    }
+    return result;
+}
+
+GraphicsInfo graphics() {
+    std::lock_guard<std::mutex> guard(g_graphicsLock);
+    return g_graphics;
+}
+
+int effectiveRate(int preferred) {
+    return g_autoSoftware.load() ? std::min(preferred, 30) : preferred;
+}
+
+namespace {
+void setGraphics(const Settings &settings, const GraphicsInfo &info) {
+    std::lock_guard<std::mutex> guard(g_graphicsLock);
+    g_graphics = info;
+    g_autoSoftware = settings.gpu == GPU_AUTO && info.mode == GraphicsMode::Software;
+}
+} // namespace
+
 bool runningKnown() {
     return g_runningKnown;
 }
@@ -1257,12 +1483,16 @@ bool adoptRunning() {
     if (readStr(L"running", L"born") != std::to_wstring(creationTime(f.qemu)))
         return false;
     loadFrom(running, L"running");
+    g_engineRate = running.rate;
+    setGraphics(running, parseGraphicsLog(readLog()));
     g_runningKnown = true;
+    setPriority(running.boost);
     return true;
 }
 
 void forgetRunning() {
     g_runningKnown = false;
+    setGraphics(Settings{}, {});
     WritePrivateProfileStringW(L"running", nullptr, nullptr, iniPath().c_str());
 }
 
@@ -1289,6 +1519,12 @@ bool emulatorRunning() {
 DWORD emulatorPid() {
     return scan().qemu;
 }
+DWORD cachedEmulatorPid() {
+    auto found = g_fastFound.load();
+    return found->qemu && found->port == instances::port() && found->born && creationTime(found->qemu) == found->born
+               ? found->qemu
+               : 0;
+}
 
 void applyLive(const Settings &s) {
     static std::mutex order; // one at a time, so the newest settings always land last
@@ -1299,8 +1535,9 @@ void applyLive(const Settings &s) {
     for (const wchar_t *key : {L"window_animation_scale", L"transition_animation_scale", L"animator_duration_scale"})
         cmd += std::wstring(L"settings put global ") + key + L" " + scale + L"; ";
     // Android's "smooth display" settings decide what apps draw at; pin both ends to the rate.
-    cmd += L"settings put system peak_refresh_rate " + std::to_wstring(s.rate) + L"; ";
-    cmd += L"settings put system min_refresh_rate " + std::to_wstring(s.rate) + L"; ";
+    const int rate = effectiveRate(std::min(s.rate, g_engineRate.load()));
+    cmd += L"settings put system peak_refresh_rate " + std::to_wstring(rate) + L"; ";
+    cmd += L"settings put system min_refresh_rate " + std::to_wstring(rate) + L"; ";
     cmd += L"settings put system show_touches " + std::wstring(s.showTouches ? L"1" : L"0") + L"\"";
     adb(cmd, 15000);
     backgroundPolicy(s.backgroundRate, s.backgroundMute, s.rate);
@@ -1350,6 +1587,10 @@ std::atomic<int> backgroundFps{0};
 std::atomic<int> foregroundFps{120};
 std::atomic<bool> muteBackground{false};
 std::atomic<unsigned> backgroundGeneration{1};
+std::atomic<std::shared_ptr<const std::wstring>> backgroundApp{std::make_shared<const std::wstring>()};
+std::wstring pacedPackage;
+int pacedRate = -1;
+DWORD pacedPid = 0;
 unsigned limitedGeneration = 0;
 std::mutex backgroundMutex;
 int limitedRate = 0;
@@ -1367,11 +1608,22 @@ void backgroundPolicy(int rate, bool mute, int foregroundRate) {
         foregroundFps = foregroundRate;
     ++backgroundGeneration;
 }
+void backgroundGame(const std::wstring &package) {
+    auto previous = backgroundApp.load();
+    if (*previous != package) {
+        backgroundApp = std::make_shared<const std::wstring>(package);
+        ++backgroundGeneration;
+    }
+}
 void backgroundTick(HWND launcher, bool restore) {
     std::lock_guard<std::mutex> guard(backgroundMutex);
+    refreshPriority(restore ? false : g_boostWanted.load());
     if (state == State::Stopped && mutedSessions.empty()) {
         limitedRate = 0;
         limitedPid = 0;
+        pacedPackage.clear();
+        pacedRate = -1;
+        pacedPid = 0;
         return;
     }
     auto pid = emulatorPid();
@@ -1385,12 +1637,14 @@ void backgroundTick(HWND launcher, bool restore) {
     DWORD focus = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &focus);
     bool inactive = !restore && state == State::Running && pid && focus != pid && focus != GetCurrentProcessId();
-    int normalRate = foregroundFps.load();
+    int normalRate = effectiveRate(std::min(foregroundFps.load(), g_engineRate.load()));
     int wanted = inactive && backgroundFps ? std::min(backgroundFps.load(), normalRate) : 0;
     auto generation = backgroundGeneration.load();
     if (state == State::Running && (wanted || limitedRate) &&
         (limitedRate != wanted || limitedPid != pid || generation != limitedGeneration)) {
-        int rate = wanted ? wanted : normalRate;
+        // 15 Hz is not a display mode on this image; Android can select 60 Hz
+        // instead. Native per-game pacing supplies the lower cap separately.
+        int rate = std::max(30, wanted ? wanted : normalRate);
         adb(L"shell \"settings put system peak_refresh_rate " + std::to_wstring(rate) + L"; settings put system min_refresh_rate " +
                 std::to_wstring(rate) + L"\"",
             3000);
@@ -1398,9 +1652,24 @@ void backgroundTick(HWND launcher, bool restore) {
         limitedPid = pid;
         limitedGeneration = generation;
     }
+    if (state == State::Running && experience::companionReady()) {
+        auto package = *backgroundApp.load();
+        int requested = wanted ? wanted : normalRate;
+        int cap = !restore && requested < g_engineRate.load() && !package.empty() ? requested : 0;
+        if (restore || pacedPackage != package || pacedRate != cap || pacedPid != pid) {
+            if (experience::framePolicy(cap ? package : L"", cap)) {
+                pacedPackage = package;
+                pacedRate = cap;
+                pacedPid = pid;
+            }
+        }
+    }
     if (state == State::Stopped) {
         limitedRate = 0;
         limitedPid = 0;
+        pacedPackage.clear();
+        pacedRate = -1;
+        pacedPid = 0;
     }
     bool mute = inactive && muteBackground;
     if (!mute && mutedSessions.empty())
@@ -1505,6 +1774,7 @@ void start(const Settings &s, const Report &report) {
     g_navigationRestart = false;
     state = State::Starting;
     running = s;
+    g_engineRate = s.rate;
     g_session++;
     boot.progress = 0;
     boot.done = false;
@@ -1568,7 +1838,7 @@ void start(const Settings &s, const Report &report) {
         std::wstring cmd = q(g_paths.sdk + L"\\emulator\\emulator.exe") + L" -avd " + AVD_NAME + L" -port " +
                            std::to_wstring(instances::port()) + L" -gpu " + gpuMode(s) + L" -no-boot-anim -vsync-rate " +
                            std::to_wstring(s.rate) + L" -cores " + std::to_wstring(std::min(6, coresFor(s))) + L" -memory " +
-                           std::to_wstring(memoryFor(s) * 1024) + L" -no-metrics -crash-report-mode disabled";
+                           std::to_wstring(memoryMiB(s)) + L" -accel on -no-metrics -crash-report-mode disabled";
         if (s.root)
             cmd += L" -ramdisk " + q(g_paths.rootImage);
         if (!s.number.empty())
@@ -1583,8 +1853,9 @@ void start(const Settings &s, const Report &report) {
             cmd += L" -qemu -smp cores=" + std::to_wstring(coresFor(s));
 
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-        HANDLE logFile = CreateFileW(g_paths.log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
-                                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE logFile = openLogForStart(sa);
+        if (logFile == INVALID_HANDLE_VALUE)
+            return fail(i18n::text(L"Couldn't open a private emulator log. Check the Velox data folder and remove linked log files."));
         HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
         SetEnvironmentVariableW(L"ANDROID_SDK_ROOT", g_paths.sdk.c_str());
         SetEnvironmentVariableW(L"ANDROID_AVD_HOME", g_paths.avdHome.c_str());
@@ -1665,17 +1936,22 @@ void start(const Settings &s, const Report &report) {
         const int presentCpu = cpuListCount(adb(L"shell cat /sys/devices/system/cpu/present", 3000));
         observeCpuCapability(requestedCpu, presentCpu);
         rememberRunning(s);
+        setGraphics(s, parseGraphicsLog(readLog()));
         applyLive(s);
         if (cancelled())
             return;
         if (!resume)
             writeStr(L"state", L"lastboot", std::to_wstring(static_cast<int>(took + 0.5f)));
         state = State::Running;
+        if (pendingWallpaper())
+            applyPendingWallpaper(report);
         boot.set(1.f, L"Ready");
         boot.done = true;
         wchar_t buf[128];
         swprintf(buf, std::size(buf), i18n::text(L"Ready in %.1f s"), took);
-        if (presentCpu > 0 && presentCpu < requestedCpu)
+        if (g_autoSoftware.load())
+            report(i18n::text(L"Software graphics fallback: temporarily using 30 Hz. Your preferred refresh rate is kept."), false);
+        else if (presentCpu > 0 && presentCpu < requestedCpu)
             report(i18n::text(L"Android limited this phone to ") + std::to_wstring(presentCpu) +
                        i18n::text(L" CPU cores. Unsupported choices are now disabled."),
                    false);
@@ -1710,13 +1986,23 @@ void finishStop(bool cleanSave) {
 
 void stop(const Report &report) {
     state = State::Stopping;
+    // Flush temporary game/host changes while the exact owned guest is still
+    // reachable. Recovery journals remain available if Android is unresponsive.
+    experience::framePolicy();
+    setPriority(false);
+    backgroundTick(nullptr, true);
     bool saving = running.quickBoot;
     report(saving ? i18n::text(L"Saving your phone so it starts instantly next time…") : i18n::text(L"Closing…"), false);
     Found f = scan(true);
     // Flush guest writes before the emulator closes its writable disk overlays.
     // This also makes a subsequent cold backup include recently saved app data.
     adb(L"shell sync", 8000);
-    adb(L"emu kill", 8000);
+    // Full boots shut Android down through its framework so services can save
+    // delayed preferences. Instant start snapshots retain the running VM.
+    if (saving)
+        adb(L"emu kill", 8000);
+    else
+        adb(L"shell svc power shutdown", 12000);
     ULONGLONG t0 = GetTickCount64(), phoneGone = 0;
     bool asked = false;
     for (;;) {
@@ -1803,9 +2089,7 @@ bool extractResource(int id, const std::wstring &path) {
     HGLOBAL data = res ? LoadResource(nullptr, res) : nullptr;
     if (!data)
         return false;
-    std::ofstream o(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
-    o.write(static_cast<const char *>(LockResource(data)), SizeofResource(nullptr, res));
-    return static_cast<bool>(o);
+    return net::writeFile(path, LockResource(data), SizeofResource(nullptr, res));
 }
 
 // The helper app (see gaming-phone/helper) that sets wallpapers; installed the first time.
@@ -2181,7 +2465,7 @@ void syncRecordingState() {
     std::unique_lock<std::mutex> guard(g_recordLock, std::try_to_lock);
     if (!guard.owns_lock())
         return;
-    DWORD pid = state == State::Running ? emulatorPid() : 0;
+    DWORD pid = state == State::Running ? cachedEmulatorPid() : 0;
     std::wstring marker = dataFolder() + L"\\recording.ini";
     if (pid != g_recordPid) {
         g_recordPid = pid;
@@ -2264,6 +2548,15 @@ void setAutoRotation(bool enabled) {
     if (g_autoRotation.exchange(enabled) != enabled)
         ++g_rotationGeneration;
 }
+void observedRotation(int rotation, DWORD pid) {
+    if (rotation < 0 || rotation > 3 || !pid) {
+        g_observedPid = 0;
+        g_observedRotation = -1;
+    } else {
+        g_observedRotation = rotation;
+        g_observedPid = pid;
+    }
+}
 
 void syncOrientation() {
     std::lock_guard<std::mutex> l(g_rotationLock);
@@ -2281,8 +2574,15 @@ void syncOrientation() {
         watchedGeneration = generation;
         followed = -1;
     }
-    int target =
-        orientation::displayRotation(adb(L"shell \"dumpsys window displays | grep -E 'Display: mDisplayId=|mRotation=[0-3]'\"", 3000));
+    int target = g_observedPid == pid ? g_observedRotation.load() : -1;
+    if (target < 0) {
+        static ULONGLONG retry = 0;
+        if (GetTickCount64() < retry)
+            return;
+        retry = GetTickCount64() + 1000;
+        target = orientation::displayRotation(
+            adb(L"shell \"dumpsys window displays | grep -E 'Display: mDisplayId=|mRotation=[0-3]'\"", 3000));
+    }
     if (target < 0)
         return;
     if (target == followed)
@@ -2324,9 +2624,14 @@ NavigationResult syncNavigation() {
         return NavigationResult::Unchanged;
     static DWORD appliedPid = 0;
     static int appliedMode = -1;
+    static int appliedSession = -1;
+    static NavigationResult appliedResult = NavigationResult::Applied;
     static ULONGLONG retryAt = 0;
     int mode = g_navigationMode;
-    if ((pid == appliedPid && mode == appliedMode) || GetTickCount64() < retryAt)
+    int session = g_session;
+    if (pid == appliedPid && mode == appliedMode && session == appliedSession)
+        return appliedResult == NavigationResult::Applied ? NavigationResult::Unchanged : appliedResult;
+    if (GetTickCount64() < retryAt)
         return NavigationResult::Unchanged;
     retryAt = GetTickCount64() + 1500;
     const wchar_t *orderOverlay = L"app.velox.navorder";
@@ -2334,35 +2639,65 @@ NavigationResult syncNavigation() {
     bool orderExists = overlays.find("app.velox.navorder") != std::string::npos;
     bool orderEnabled = overlays.find("[x] app.velox.navorder") != std::string::npos;
     bool pending = g_navigationRestart;
+    auto remember = [&](NavigationResult result) {
+        appliedPid = pid;
+        appliedMode = mode;
+        appliedSession = session;
+        appliedResult = result;
+        return result;
+    };
+    auto rootAccess = [&] {
+        auto result = adb(L"shell \"export PATH=/debug_ramdisk:/sbin:$PATH; if command -v su >/dev/null 2>&1; then su -c id; else echo velox-no-su; fi\"", 5000);
+        if (result.find("uid=0(") != std::string::npos)
+            return NavigationResult::Applied;
+        if (result.find("velox-no-su") != std::string::npos)
+            return NavigationResult::NeedsRoot;
+        return result.empty() ? NavigationResult::Unchanged : NavigationResult::NeedsAccess;
+    };
     if (mode != 1 || orderExists)
         g_navigationRestart = false;
     if (mode == 1 && !orderExists) {
         if (pending)
             return NavigationResult::RestartRequired;
-        if (adb(L"shell su -c id", 5000).find("uid=0(") == std::string::npos)
-            return NavigationResult::NeedsRoot;
+        adb(L"shell cmd overlay enable-exclusive --user current --category com.android.internal.systemui.navbar.threebutton", 3000);
+        auto access = rootAccess();
+        if (access == NavigationResult::NeedsRoot)
+            return remember(access);
+        if (access != NavigationResult::Applied)
+            return access;
         // Pixel Launcher owns Android 15's unified phone navbar. Only its button
         // container is reversed; the home screen and contextual controls retain LTR.
         HRSRC expected = FindResourceW(nullptr, MAKEINTRESOURCEW(205), RT_RCDATA);
         HGLOBAL loaded = expected ? LoadResource(nullptr, expected) : nullptr;
         if (!loaded)
-            return NavigationResult::Unsupported;
+            return remember(NavigationResult::Unsupported);
         std::string apkPath = adb(L"shell pm path com.google.android.apps.nexuslauncher", 3000);
         if (apkPath.rfind("package:/", 0) != 0 || apkPath.find_first_of("\r\n\"' ") != std::string::npos)
-            return NavigationResult::Unsupported;
+            return remember(NavigationResult::Unsupported);
         std::string actual = adb(L"exec-out unzip -p " + widen(apkPath.substr(8)) + L" res/layout/taskbar.xml", 5000);
         std::string original(static_cast<const char *>(LockResource(loaded)), SizeofResource(nullptr, expected));
         if (actual != original)
-            return NavigationResult::Unsupported;
+            return remember(NavigationResult::Unsupported);
+        HRSRC guardResource = FindResourceW(nullptr, MAKEINTRESOURCEW(206), RT_RCDATA);
+        HGLOBAL guardLoaded = guardResource ? LoadResource(nullptr, guardResource) : nullptr;
+        if (!guardLoaded)
+            return remember(NavigationResult::Unsupported);
+        std::string guard(static_cast<const char *>(LockResource(guardLoaded)), SizeofResource(nullptr, guardResource));
+        auto marker = guard.find("\nEXPECTED=");
+        if (marker == std::string::npos)
+            return remember(NavigationResult::Unsupported);
+        auto hash = guard.substr(marker + 10, 64);
+        auto actualHash = adb(L"shell sha256sum " + widen(apkPath.substr(8)), 5000);
+        if (hash.size() != 64 || hash.find_first_not_of("0123456789abcdef") != std::string::npos || actualHash.rfind(hash, 0) != 0)
+            return remember(NavigationResult::Unsupported);
         std::wstring localApk = dataFolder() + L"\\VeloxNavOrder.apk", localProp = dataFolder() + L"\\velox-navigation.prop",
                      localGuard = dataFolder() + L"\\velox-navigation.sh";
         if (!extractResource(203, localApk) || !extractResource(206, localGuard))
-            return NavigationResult::Unsupported;
-        {
-            std::ofstream prop{std::filesystem::path(localProp), std::ios::binary | std::ios::trunc};
-            prop << "id=velox-navigation\nname=Velox native navigation\nversion=1.0\nversionCode=1\nauthor=Velox\n"
-                    "description=Optional native button order for Velox Android 15.\n";
-        }
+            return remember(NavigationResult::Unsupported);
+        const std::string prop = "id=velox-navigation\nname=Velox native navigation\nversion=1.0\nversionCode=1\nauthor=Velox\n"
+                                 "description=Optional native button order for Velox Android 15.\n";
+        if (!net::writeFile(localProp, prop.data(), prop.size()))
+            return remember(NavigationResult::Unsupported);
         std::string ignored;
         DWORD pushed =
             run(adbExe() + L" -s " + serial() + L" push " + q(localApk) + L" /data/local/tmp/VeloxNavOrder.apk", &ignored, 15000);
@@ -2378,7 +2713,7 @@ NavigationResult syncNavigation() {
         if (pushed != 0)
             return NavigationResult::Unchanged;
         std::string prepared =
-            adb(L"shell \"su -c 'mkdir -p /data/adb/modules/velox-navigation/system/product/overlay && "
+            adb(L"shell \"PATH=/debug_ramdisk:/sbin:$PATH su -c 'mkdir -p /data/adb/modules/velox-navigation/system/product/overlay && "
                 L"cp /data/local/tmp/VeloxNavOrder.apk /data/adb/modules/velox-navigation/VeloxNavOrder.apk && "
                 L"cp /data/local/tmp/VeloxNavOrder.apk /data/adb/modules/velox-navigation/system/product/overlay/VeloxNavOrder.apk && "
                 L"cp /data/local/tmp/velox-navigation.prop /data/adb/modules/velox-navigation/module.prop && "
@@ -2391,15 +2726,20 @@ NavigationResult syncNavigation() {
                 5000);
         adb(L"shell rm -f /data/local/tmp/VeloxNavOrder.apk /data/local/tmp/velox-navigation.prop /data/local/tmp/velox-navigation.sh");
         if (prepared.find("velox-nav-prepared") == std::string::npos)
-            return NavigationResult::NeedsRoot;
+            return NavigationResult::NeedsAccess;
         g_navigationRestart = true;
         return NavigationResult::RestartRequired;
     }
     bool refreshOrder = orderExists && orderEnabled != (mode == 1);
     // Check before changing the overlay: without a launcher refresh Android can
     // report the new preference while its visible buttons still use the old order.
-    if (refreshOrder && adb(L"shell su -c id", 5000).find("uid=0(") == std::string::npos)
-        return NavigationResult::NeedsRoot;
+    if (refreshOrder) {
+        auto access = rootAccess();
+        if (access == NavigationResult::NeedsRoot)
+            return remember(access);
+        if (access != NavigationResult::Applied)
+            return access;
+    }
     const wchar_t *package =
         mode == 2 ? L"com.android.internal.systemui.navbar.gestural" : L"com.android.internal.systemui.navbar.threebutton";
     std::wstring command = std::wstring(L"shell \"cmd overlay enable-exclusive --user current --category ") + package;
@@ -2410,14 +2750,13 @@ NavigationResult syncNavigation() {
         if (refreshOrder) {
             bool home = adb(L"shell \"dumpsys window | grep -m1 mCurrentFocus\"", 3000).find("com.google.android.apps.nexuslauncher/") !=
                         std::string::npos;
-            std::string refreshed = adb(L"shell \"su -c 'killall com.google.android.apps.nexuslauncher; echo velox-nav-refreshed'\"", 5000);
+            std::string refreshed = adb(L"shell \"PATH=/debug_ramdisk:/sbin:$PATH su -c 'killall com.google.android.apps.nexuslauncher; echo velox-nav-refreshed'\"", 5000);
             if (refreshed.find("velox-nav-refreshed") == std::string::npos)
-                return NavigationResult::NeedsRoot;
+                return NavigationResult::NeedsAccess;
             if (home)
                 adb(L"shell input keyevent KEYCODE_HOME", 3000);
         }
-        appliedPid = pid;
-        appliedMode = mode;
+        remember(NavigationResult::Applied);
         retryAt = 0;
         return NavigationResult::Applied;
     }
@@ -2449,7 +2788,7 @@ int sampleFps() {
 namespace {
 
 // Sends a finished picture to the phone and sets it on the home and lock screen.
-bool pushWallpaper(gp::Bitmap &bmp, const std::wstring &name, const Report &report) {
+bool pushWallpaper(gp::Bitmap &bmp, const Report &report) {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     std::wstring local = std::wstring(tmp) + L"Velox-wallpaper-" + std::to_wstring(GetCurrentProcessId()) + L".png";
@@ -2477,38 +2816,170 @@ bool pushWallpaper(gp::Bitmap &bmp, const std::wstring &name, const Report &repo
         report(i18n::text(L"The phone didn't accept the wallpaper."), true);
         return false;
     }
-    report(name + L" wallpaper set", false);
+    report(i18n::text(L"Wallpaper applied."), false);
     return true;
 }
 
 } // namespace
 
-bool applyWallpaper(int index, int brand, const Report &report) {
-    const auto &wp = art::wallpapers();
-    if (index < 0 || index >= static_cast<int>(wp.size()))
+namespace {
+std::mutex wallpaperQueueMutex, wallpaperApplyMutex;
+struct PendingWallpaper {
+    std::wstring file;
+    std::string hash;
+};
+std::wstring wallpaperQueuePath() { return dataFolder() + L"\\wallpaper-choice\\selection.ini"; }
+bool ownedPendingName(const std::wstring &name) {
+    if (name.size() != 54 || name.rfind(L"pending-wallpaper-", 0) != 0 || !name.ends_with(L".png"))
         return false;
-    const Display &d = displays()[running.display];
-    report(L"Drawing the " + std::wstring(wp[index].name) + L" wallpaper at " + d.detail + L"…", false);
-    auto bmp = art::renderWallpaper(index, d.w, d.h);
-    {
-        gp::Graphics g(bmp.get());
-        art::drawBranding(g, d.w, d.h, brand);
-    }
-    return pushWallpaper(*bmp, wp[index].name, report);
+    return std::all_of(name.begin() + 18, name.end() - 4, [](wchar_t c) { return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'); });
 }
-
-bool applyWallpaperFile(const std::wstring &image, int brand, const Report &report) {
-    gp::Bitmap src(image.c_str());
-    if (src.GetLastStatus() != gp::Ok || src.GetWidth() == 0) {
-        report(i18n::text(L"That picture couldn't be opened."), true);
+PendingWallpaper readPendingWallpaper() {
+    auto meta = wallpaperQueuePath();
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(meta.c_str(), GetFileExInfoStandard, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || info.nFileSizeHigh || info.nFileSizeLow > 512)
+        return {};
+    // The INI APIs cache rapidly replaced files, even after a cache flush. Read
+    // this tiny transaction record directly so quick selections are latest-wins.
+    HANDLE input = CreateFileW(meta.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                               FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (input == INVALID_HANDLE_VALUE)
+        return {};
+    BY_HANDLE_FILE_INFORMATION opened{};
+    char buffer[513]{};
+    DWORD count = 0;
+    bool valid = GetFileInformationByHandle(input, &opened) &&
+                 !(opened.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+                 !opened.nFileSizeHigh && opened.nFileSizeLow <= 512 && ReadFile(input, buffer, sizeof(buffer), &count, nullptr);
+    CloseHandle(input);
+    if (!valid || count > 512)
+        return {};
+    std::string content(buffer, count);
+    std::smatch fields;
+    static const std::regex format("\\[wallpaper\\]\\r?\\nfile=(pending-wallpaper-[a-f0-9]{32}\\.png)\\r?\\nsha256=([a-f0-9]{64})\\r?\\n");
+    if (content.size() > 512 || !std::regex_match(content, fields, format))
+        return {};
+    return {widen(fields[1].str()), fields[2].str()};
+}
+}
+bool wallpaperChoiceFile(const std::wstring &name) {
+    return name == L"selection.ini" || ownedPendingName(name);
+}
+bool pendingWallpaper() {
+    std::lock_guard<std::mutex> guard(wallpaperQueueMutex);
+    return !readPendingWallpaper().file.empty();
+}
+bool selectWallpaper(int builtin, const std::wstring &image, int brand, int display, const Report &report) {
+    if (display < 0 || display >= int(displays().size()) || brand < 0 || brand > 3)
+        return false;
+    const auto &d = displays()[display];
+    std::unique_ptr<gp::Bitmap> picture;
+    if (builtin >= 0) {
+        if (builtin >= int(art::wallpapers().size()))
+            return false;
+        picture = art::renderWallpaper(builtin, d.w, d.h);
+        if (picture) {
+            gp::Graphics graphics(picture.get());
+            art::drawBranding(graphics, d.w, d.h, brand);
+        }
+    } else {
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (!GetFileAttributesExW(image.c_str(), GetFileExInfoStandard, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || info.nFileSizeHigh ||
+            info.nFileSizeLow > 32u * 1024 * 1024) {
+            report(i18n::text(L"Choose a regular PNG or JPG smaller than 32 MB."), true);
+            return false;
+        }
+        gp::Bitmap source(image.c_str());
+        if (source.GetLastStatus() != gp::Ok || !source.GetWidth() || !source.GetHeight() || source.GetWidth() > 16384 ||
+            source.GetHeight() > 16384 || uint64_t(source.GetWidth()) * source.GetHeight() > 32000000) {
+            report(i18n::text(L"That picture couldn't be opened."), true);
+            return false;
+        }
+        picture = art::fitImage(source, d.w, d.h, brand);
+    }
+    if (!picture || picture->GetLastStatus() != gp::Ok)
+        return false;
+    GUID identity{};
+    if (FAILED(CoCreateGuid(&identity)))
+        return false;
+    wchar_t guid[40]{};
+    StringFromGUID2(identity, guid, 40);
+    std::wstring id;
+    for (auto c : std::wstring(guid))
+        if (iswxdigit(c))
+            id += wchar_t(towlower(c));
+    createDirs(dataFolder() + L"\\wallpaper-choice");
+    std::wstring name = L"pending-wallpaper-" + id + L".png", path = dataFolder() + L"\\wallpaper-choice\\" + name;
+    if (!ownedPendingName(name) || !art::savePng(*picture, path)) {
+        report(i18n::text(L"Couldn't create the wallpaper."), true);
         return false;
     }
-    const Display &d = displays()[running.display];
-    report(L"Fitting " + fileName(image) + L" to the phone screen…", false);
-    auto bmp = art::fitImage(src, d.w, d.h, brand);
-    std::wstring name = fileName(image);
-    name = name.substr(0, name.find_last_of(L'.'));
-    return pushWallpaper(*bmp, L"The " + name, report);
+    auto hash = net::hashFile(path, net::Hash::Sha256);
+    bool saved = false;
+    {
+        std::lock_guard<std::mutex> guard(wallpaperQueueMutex);
+        auto previous = readPendingWallpaper();
+        auto meta = wallpaperQueuePath(), temporary = meta + L"." + id;
+        std::string contents = "[wallpaper]\nfile=" + narrow(name) + "\nsha256=" + hash + "\n";
+        HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written = 0;
+        if (file != INVALID_HANDLE_VALUE) {
+            saved = WriteFile(file, contents.data(), DWORD(contents.size()), &written, nullptr) && written == contents.size() &&
+                    FlushFileBuffers(file);
+            CloseHandle(file);
+        }
+        saved = saved && hash.size() == 64 && MoveFileExW(temporary.c_str(), meta.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (saved) {
+            if (!previous.file.empty())
+                DeleteFileW((dataFolder() + L"\\wallpaper-choice\\" + previous.file).c_str());
+        } else
+            DeleteFileW(temporary.c_str());
+    }
+    if (!saved) {
+        DeleteFileW(path.c_str());
+        report(i18n::text(L"The wallpaper choice couldn't be saved."), true);
+        return false;
+    }
+    if (state == State::Running)
+        return applyPendingWallpaper(report);
+    report(i18n::text(L"Wallpaper saved for the next start."), false);
+    return true;
+}
+bool applyPendingWallpaper(const Report &report) {
+    std::lock_guard<std::mutex> application(wallpaperApplyMutex);
+    if (state != State::Running)
+        return false;
+    PendingWallpaper selected;
+    {
+        std::lock_guard<std::mutex> guard(wallpaperQueueMutex);
+        selected = readPendingWallpaper();
+    }
+    if (selected.file.empty())
+        return true;
+    auto path = dataFolder() + L"\\wallpaper-choice\\" + selected.file;
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        net::hashFile(path, net::Hash::Sha256) != selected.hash) {
+        report(i18n::text(L"The saved wallpaper changed or is missing. Choose it again."), true);
+        return false;
+    }
+    {
+        gp::Bitmap source(path.c_str());
+        const auto &d = displays()[std::clamp(running.display, 0, int(displays().size()) - 1)];
+        if (source.GetLastStatus() != gp::Ok || !source.GetWidth() || !source.GetHeight() || source.GetWidth() > 4096 || source.GetHeight() > 4096)
+            return false;
+        auto picture = art::fitImage(source, d.w, d.h, art::BRAND_NONE);
+        if (!picture || !pushWallpaper(*picture, report))
+            return false;
+    } // GDI+ holds the source file open until its Bitmap is destroyed.
+    std::lock_guard<std::mutex> guard(wallpaperQueueMutex);
+    if (readPendingWallpaper().file == selected.file) {
+        DeleteFileW(wallpaperQueuePath().c_str());
+        DeleteFileW(path.c_str());
+    }
+    return true;
 }
 
 std::wstring wallpaperFolder() {
@@ -2583,9 +3054,9 @@ bool setupRoot(const Report &report) {
     std::wstring work = dataFolder() + L"\\root";
     createDirs(work);
     std::wstring script = work + L"\\rootAVD.sh", apk = work + L"\\Magisk-v31.1.apk";
-    {
-        std::ofstream o(std::filesystem::path(script), std::ios::binary | std::ios::trunc);
-        o.write(static_cast<const char *>(LockResource(data)), SizeofResource(nullptr, res));
+    if (!extractResource(200, script)) {
+        report(i18n::text(L"Root setup couldn't save its files. Check that the Velox folder is writable."), true);
+        return false;
     }
     report(i18n::text(L"Downloading Magisk v31.1 from GitHub…"), false);
     std::wstring err;
@@ -2614,28 +3085,38 @@ bool setupRoot(const Report &report) {
         report(i18n::text(L"Couldn't copy the root tools to the phone."), true);
         return false;
     }
-    out = adb(L"shell \"cd " + W + L" && MAGISKVERCHOOSEN=false sh " + W +
+    out = adb(L"shell \"cd " + W + L" && MAGISKVERCHOOSEN=false AVDIsOnline=false sh " + W +
                   L"/rootAVD.sh system-images/android-35/google_apis_playstore/x86_64/ramdisk.img 2>&1\"",
               300000);
     std::wstring target = exeFolder() + L"root";
     createDirs(target);
-    std::wstring tmpImg = target + L"\\ramdisk-root.img.new";
+    GUID transfer{};
+    wchar_t suffix[40]{};
+    if (FAILED(CoCreateGuid(&transfer)) || !StringFromGUID2(transfer, suffix, 40))
+        return false;
+    std::wstring temporaryName = std::wstring(L"\\ramdisk-root.img.") + suffix;
+    std::wstring tmpImg = target + temporaryName;
     out.clear();
     run(adbExe() + L" -s " + serial() + L" pull " + W + L"/ramdiskpatched4AVD.img " + q(tmpImg), &out, 120000);
     WIN32_FILE_ATTRIBUTE_DATA fa{};
-    if (!GetFileAttributesExW(tmpImg.c_str(), GetFileExInfoStandard, &fa) || fa.nFileSizeLow < 100000) {
+    if (!GetFileAttributesExW(tmpImg.c_str(), GetFileExInfoStandard, &fa) ||
+        (fa.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || fa.nFileSizeHigh || fa.nFileSizeLow < 100000) {
         // The exe's folder may not be writable; keep the image in AppData instead.
         target = dataFolder() + L"\\root";
-        tmpImg = target + L"\\ramdisk-root.img.new";
+        tmpImg = target + temporaryName;
         out.clear();
         run(adbExe() + L" -s " + serial() + L" pull " + W + L"/ramdiskpatched4AVD.img " + q(tmpImg), &out, 120000);
-        if (!GetFileAttributesExW(tmpImg.c_str(), GetFileExInfoStandard, &fa) || fa.nFileSizeLow < 100000) {
+        if (!GetFileAttributesExW(tmpImg.c_str(), GetFileExInfoStandard, &fa) ||
+            (fa.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || fa.nFileSizeHigh || fa.nFileSizeLow < 100000) {
             report(L"Patching didn't work. Details are in the phone's " + W + L" folder.", true);
             return false;
         }
     }
     std::wstring img = target + L"\\ramdisk-root.img";
-    MoveFileExW(tmpImg.c_str(), img.c_str(), MOVEFILE_REPLACE_EXISTING);
+    if (!net::moveFile(tmpImg, img)) {
+        report(i18n::text(L"Root setup couldn't save its files. Check that the Velox folder is writable."), true);
+        return false;
+    }
     report(i18n::text(L"Installing the Magisk app…"), false);
     out.clear();
     run(adbExe() + L" -s " + serial() + L" install -r " + q(apk), &out, 120000);

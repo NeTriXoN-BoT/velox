@@ -1,0 +1,32 @@
+{
+  "engine": "37.2.13",
+  "platform_tools": "37.0.1",
+  "image": "android-35/google_apis_playstore/x86_64/r9",
+  "license_sha256": "1f8729233617b193fd619213792ae16a41b95d2bbbf525dfe66998252ba68b16",
+  "packages": [
+    {
+      "name": "platform-tools",
+      "url": "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip",
+      "bytes": 9054187,
+      "sha256": "d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1",
+      "sha1": "477254aa5f903c15cf51001717bdf347fb6b53e0",
+      "into": ""
+    },
+    {
+      "name": "emulator",
+      "url": "https://dl.google.com/android/repository/emulator-linux_x64-16740729.zip",
+      "bytes": 349658551,
+      "sha256": "cbc7c3cfb83220b8a0f9c513fdab557712e74d339ec19ddffa43f23350ae9bdd",
+      "sha1": "f41f9e31eb5ca64926603c03265c50bbc0ff4172",
+      "into": ""
+    },
+    {
+      "name": "system-image",
+      "url": "https://dl.google.com/android/repository/sys-img/google_apis_playstore/x86_64-35_r09.zip",
+      "bytes": 1762061559,
+      "sha256": "1fb5e5fd1c4b1b54bfe5558f6f361d6c10e13786acff630153e0542df356dfe6",
+      "sha1": "2f0054868e6aab3c098acd3decba17a82aed4176",
+      "into": "system-images/android-35/google_apis_playstore"
+    }
+  ]
+}

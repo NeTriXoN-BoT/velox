@@ -15,6 +15,7 @@ public class BridgeProvider extends ContentProvider {
     void enforce() { getContext().enforceCallingPermission("android.permission.DUMP", "Only adb may use the desktop bridge"); }
     public Bundle call(String method, String arg, Bundle extras) {
         enforce();
+        Catalog.desktopSeen();
         Bundle b = new Bundle();
         b.putBoolean("ok", false);
         SharedPreferences p = Catalog.prefs(getContext());
@@ -31,7 +32,6 @@ public class BridgeProvider extends ContentProvider {
         if ("hello".equals(method)) {
             b.putString("build", Build.ID);
             b.putBoolean("ok", true);
-            p.edit().putLong("desktopSeen", System.currentTimeMillis()).apply();
         }
         if ("sync".equals(method) && arg != null && arg.matches("[012],[01],[0-9]{1,19},[01]")) {
             synchronized (Catalog.SETTINGS_LOCK) {
@@ -40,7 +40,7 @@ public class BridgeProvider extends ContentProvider {
                 try { revision = Long.parseLong(f[2]); }
                 catch (NumberFormatException invalidRevision) { return b; }
                 SharedPreferences.Editor edit =
-                    p.edit().putLong("desktopSeen", System.currentTimeMillis()).putLong("desktopAck", revision);
+                    p.edit().putLong("desktopAck", revision);
                 // Don't overwrite an Android edit made after the desktop read its state.
                 if (p.getLong("revision", 0) <= revision)
                     edit.putInt("navigation", Integer.parseInt(f[0])).putBoolean("rotate", f[1].equals("1")).putInt("language", Integer.parseInt(f[3]));
@@ -74,6 +74,7 @@ public class BridgeProvider extends ContentProvider {
         enforce();
         if (!"r".equals(mode))
             throw new FileNotFoundException("Read only");
+        Catalog.desktopSeen();
         return openPipeHelper(uri, "application/octet-stream", null, uri, (out, u, m, options, request) -> {
             try (OutputStream stream = new ParcelFileDescriptor.AutoCloseOutputStream(out)) {
                 if ("/apps".equals(request.getPath())) {

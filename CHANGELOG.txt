@@ -1,3 +1,44 @@
+2.7.0 | 2026-11-08
+[New]
+- Linux x86-64 AppImage with the Velox interface, automatic Android setup, game library, independent phones and controls.
+- Linux KVM acceleration, OpenGL phone view, SDL controllers and native X11/Wayland mouse capture.
+- Linux verified backups, recovery and Undo, cold clones, templates, reversible phone removal and storage moves.
+- Linux signed AppImage updates retain the previous image; optional application-menu integration is available per account.
+- Linux local file drops support reviewed app installation, expansion files and phone transfers.
+- The System page includes VRAM percentages and live temperature, clock, power and fan readings when the hardware exposes them.
+- Wallpaper choices can be queued while the phone is off and applied at the next boot.
+[Improved]
+- Hardware summaries, page actions and FPS labels have separate space at every supported interface scale.
+- Launcher paints reuse a retained surface; window movement consumes cached engine state instead of waiting for discovery.
+- The phone dock follows native window-movement events, and the engine window uses Velox taskbar branding and relaunch details.
+- Host input handling and foreground performance work run independently of the launcher UI.
+- A persistent Android display observer follows app orientation without repeated process polling.
+- Native per-game frame pacing preserves Android interventions and restores temporary background limits.
+- Automatic desktop sizing stays moderate; the phone dock includes Close view.
+- Memory controls show Android 15's actual 2.5 GB minimum while retaining existing portable profiles.
+- Velox Home filters, app labels and the settings control fit larger accessibility text.
+- Automatic graphics uses the SDK's native selection and reports the actual Android renderer.
+- A temporary 30 Hz software fallback preserves the preferred refresh rate for the next hardware-rendered boot.
+- Automatic memory allocations leave room for integrated graphics; manual process priorities remain authoritative.
+- Full shutdown lets Android services save pending preferences; temporary game and focus limits are restored before exit.
+- Native host telemetry reads kernel sensors and the installed graphics driver; unsupported values remain unavailable.
+- Adaptive Linux graphics and per-phone audio use the installed desktop services.
+- Ordered Android clipboard transfers avoid timing races and preserve the previous clipboard during text entry.
+- One launcher per data folder, private activation sockets and normal-account startup.
+- Optional focus-scoped GameMode requests use PID file descriptors and journal interrupted cleanup.
+- Auto allocations respect current affinity, cgroup limits, shared graphics memory and other running phones.
+- Optional daily and weekly backups pause at recovery-count and storage limits without deleting older points.
+- German labels, validation messages, standard Linux dialogs and decimal inputs follow the selected language.
+- Linux runtime packaging omits unused development, terminal and Tcl/Tk components and includes versioned licenses and corresponding sources.
+[Fixed]
+- Windows downloads validate file links before truncation, publish through the held verified handle and preserve previous files on failure.
+- Resource and configuration writes use fresh files and atomic replacement instead of truncating an existing linked file.
+- Emulator logs reject links before opening or truncating their contents.
+- Closing Windows setup during a license download no longer leaves an allocated window-message payload.
+- Reverse-button setup locates Magisk's active Root path, explains Shell access and verifies the complete Android launcher before modification.
+- Velox Home respects Android's 12/24-hour clock preference.
+- Linux crashed-engine state is reconciled so stopped-phone maintenance remains available.
+
 2.6.0 | 2026-11-08
 [New]
 - Automatic desktop UI scaling with percentage overrides and a dedicated English/German scaling view.

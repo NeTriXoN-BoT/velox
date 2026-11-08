@@ -4,9 +4,9 @@
 
 | Einstellung | Bedeutung |
 | :-- | :-- |
-| Velox-Oberfläche: Auto | Stimmt Windows-DPI und den Platz auf dem Desktop ab. Ein normaler 1080p-Arbeitsbereich startet ungefähr bei 125 %, 1440p bei 150 % und 4K bei 200 %. Windows-Skalierung und verfügbarer Platz werden berücksichtigt. |
+| Velox-Oberfläche: Auto | Stimmt Monitor-DPI und den Platz auf dem Desktop ab. Ein normaler 1080p- oder 1440p-Arbeitsbereich startet ungefähr bei 125 %, 4K bei 150 %. Systemskalierung und verfügbarer Platz werden berücksichtigt. Eine höhere systemweite Skalierung für Barrierefreiheit bleibt erhalten. |
 | Velox-Oberfläche: Prozentwert | Die Referenzoberfläche von 900 × 640 wird mit diesem Verhältnis in physischen Pixeln neu gezeichnet. Eingabefelder und Velox-Dialoge folgen der tatsächlich angewendeten Größe. |
-| Handyfenster: Auto | Passt Handy und Symbolleiste mit etwas Abstand in den Desktop ein. Nach Drehung, Bildschirm-/DPI-Wechsel oder einem Wechsel der Andockseite wird die Größe erneut angepasst. |
+| Handyfenster: Auto | Passt Handy und Symbolleiste mit etwas Abstand in den Desktop ein und begrenzt die automatische Größe auf großen oder ultrabreiten Bildschirmen. Nach Drehung, Bildschirm-/DPI-Wechsel oder einem Wechsel der Andockseite wird die Größe erneut angepasst. |
 | Handyfenster: Prozentwert | Größe des sichtbaren Android-Bildes im Verhältnis zur Android-Auflösung. 25 % von 1080 × 2400 entsprechen zum Beispiel 270 × 600 Pixeln ohne Rahmen. |
 
 Beide Einstellungen stehen standardmäßig auf Auto. Passt der gewählte Prozentwert nicht auf den Desktop, verwendet Velox einen kleineren Wert und zeigt diesen an. Taskleiste, Fenstertitel, Rahmen und Symbolleiste werden berücksichtigt. Die Auswahl bleibt gespeichert und kann auf einem größeren Bildschirm wieder verwendet werden. Bereits gespeicherte gültige benutzerdefinierte Werte erscheinen ebenfalls in der Auswahl.

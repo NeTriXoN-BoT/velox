@@ -132,6 +132,8 @@ bool allowed(const std::wstring &name) {
         return false;
     if (name == L"desktop/settings.ini" || name == L"root/ramdisk-root.img")
         return true;
+    if (name.rfind(L"desktop/wallpaper-choice/", 0) == 0)
+        return wallpaperChoiceFile(name.substr(25));
     if (name.rfind(L"desktop/controls/", 0) == 0 || name.rfind(L"desktop/presets/", 0) == 0)
         return name.find('/', name.rfind(L"desktop/controls/", 0) == 0 ? 17 : 16) == std::wstring::npos &&
                fs::path(name).extension() == L".ini";
@@ -540,7 +542,9 @@ void configureCopy(const std::wstring &target, const Manifest &m, const std::wst
 void rollback(const Report &report) {
     auto t = transaction(), journal = t + L"\\journal.ini";
     noLinks(t);
-    for (const wchar_t *name : {L"controls", L"presets"}) {
+    for (const wchar_t *name : {L"controls", L"presets", L"wallpaper-choice"}) {
+        if (std::wstring(name) == L"wallpaper-choice" && get(journal, L"original", name).empty())
+            continue; // Recovery points made before deferred wallpapers did not capture this folder.
         auto old = t + L"\\old-" + name, now = dataFolder() + L"\\" + name;
         if (exists(old)) {
             if (exists(now))
@@ -670,7 +674,7 @@ bool createBackup(bool automatic, const Report &report) {
             }
         }
         source.push_back({L"desktop/settings.ini", iniPath()});
-        for (auto name : {L"controls", L"presets"}) {
+        for (auto name : {L"controls", L"presets", L"wallpaper-choice"}) {
             auto d = dataFolder() + L"\\" + name;
             noLinks(d);
             if (isDir(d))
@@ -1053,14 +1057,14 @@ bool activate(const std::wstring &target, const Report &report) {
         WritePrivateProfileStringW(L"running", nullptr, nullptr, fresh.c_str());
         flushIni(fresh);
         auto journal = t + L"\\journal.ini";
-        for (auto name : {L"controls", L"presets"}) {
+        for (auto name : {L"controls", L"presets", L"wallpaper-choice"}) {
             put(journal, L"original", name, isDir(dataFolder() + L"\\" + name) ? L"1" : L"0");
             copyTree(target + L"\\desktop\\" + name, t + L"\\new-" + name);
         }
         put(journal, L"restore", L"state", L"pending");
         flushIni(journal);
         try {
-            for (auto name : {L"controls", L"presets"}) {
+            for (auto name : {L"controls", L"presets", L"wallpaper-choice"}) {
                 auto active = dataFolder() + L"\\" + name;
                 if (exists(active))
                     move(active, t + L"\\old-" + name);

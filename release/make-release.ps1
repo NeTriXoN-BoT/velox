@@ -9,11 +9,11 @@
 #
 # Every release: raise gaming-phone\VERSION, run this, then upload dist\velox\Velox.exe to
 # -DownloadBase and dist\velox\update.txt to the address in gaming-phone\update-url.txt.
-param([string]$DownloadBase = '', [switch]$Installer)
+param([string]$DownloadBase = '', [switch]$Installer, [string]$KeyFile = '', [string]$HelperKeystore = '', [string]$HelperPasswordFile = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot
 $dist = Join-Path $root 'dist'
-$keyFile = Join-Path $root 'keys\update-signing.key'
+if (-not $KeyFile) { $KeyFile = Join-Path $root 'keys\update-signing.key' }
 $version = (Get-Content "$root\VERSION" -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'VERSION must be a numeric major.minor.patch version.' }
 $dist = [IO.Path]::GetFullPath($dist)
@@ -31,7 +31,7 @@ if (Test-Path -LiteralPath $stage) {
     Remove-Item -LiteralPath $stage -Recurse -Force
 }
 New-Item -ItemType Directory -Force $stage, "$stage\licenses\rootAVD" | Out-Null
-& "$root\build.ps1" -Out $stage
+& "$root\build.ps1" -Out $stage -HelperKeystore $HelperKeystore -HelperPasswordFile $HelperPasswordFile
 Copy-Item "$PSScriptRoot\README.txt", "$PSScriptRoot\THIRD-PARTY-NOTICES.txt" $stage
 Copy-Item "$root\CHANGELOG.txt" "$stage\CHANGELOG.txt"
 Copy-Item "$root\LICENSE.txt" "$stage\LICENSE.txt"

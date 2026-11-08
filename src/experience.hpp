@@ -28,5 +28,6 @@ void favorite(const AppInfo &app, const Report &report);
 void classify(const AppInfo &app, const Report &report);
 void openHome(const Report &report, bool makeDefault = false);
 void openSettings(const Report &report);
-std::wstring inputCommand();
+std::wstring inputCommand(bool observe = false);
+bool framePolicy(const std::wstring &package = L"", int rate = 0);
 } // namespace phone::experience

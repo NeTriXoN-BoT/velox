@@ -214,7 +214,7 @@ struct Window {
             std::vector<std::wstring> memory = {i18n::text(L"Global")};
             int ram = 0;
             for (size_t i = 0; i < memoryChoices().size(); i++) {
-                memory.push_back(memoryChoices()[i] ? std::to_wstring(memoryChoices()[i]) : i18n::text(L"Auto"));
+                memory.push_back(memoryChoices()[i] ? memoryLabel(memoryChoices()[i]) : i18n::text(L"Auto"));
                 if (preset.memory == memoryChoices()[i])
                     ram = int(i) + 1;
             }

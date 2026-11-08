@@ -95,7 +95,7 @@ std::wstring summary(const Settings &global, const std::wstring &p) {
         return L"Uses your global settings";
     auto s = apply(global, p);
     return std::wstring(displays()[s.display].name) + L" · " + std::to_wstring(s.rate) + L" FPS · " + std::to_wstring(coresFor(s)) +
-           i18n::text(L" cores · ") + std::to_wstring(memoryFor(s)) + L" GB";
+           i18n::text(L" cores · ") + memoryLabel(memoryFor(s)) + L" GB";
 }
 void remember(const std::wstring &p) {
     auto f = dataFolder() + L"\\session.ini";

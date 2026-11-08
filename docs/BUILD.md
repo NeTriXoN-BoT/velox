@@ -35,6 +35,14 @@ This makes a clean portable ZIP, per-file SHA-256 manifest, archive checksum and
 
 Official maintainers can also pass `-DownloadBase https://github.com/<owner>/<repo>/releases/download/v<version>/` to sign `update.txt` using their local update key. Never publish `keys/`. Forks should set their own `update-url.txt` and use `release/new-signing-key.ps1` to create a separate update identity before distributing their own update channel. The checked-in public key authenticates official Velox updates only.
 
+Use `-HelperKeystore` and `-HelperPasswordFile` to build with an existing Android
+signing identity kept outside this checkout. The release script accepts the same
+arguments and `-KeyFile` for an external ECDSA update key. Password contents are
+read from their file by the signing tools and are not placed in process arguments.
+For Linux packaging, see [the AppImage build guide](LINUX-BUILD.md).
+
+The official repository keeps only the latest published release and its version tag. After a replacement release and every download/checksum/update link have been verified, remove the previous release pages, assets and version tags. Keep the Git commit history and changelog. Never remove the current working release before its replacement has passed validation.
+
 ## Checks
 
 ```powershell

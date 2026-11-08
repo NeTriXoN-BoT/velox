@@ -16,6 +16,17 @@ jobs:
           python-version: '3.12'
       - name: Validate source and assets
         run: python tools/check-source.py
+      - name: Check Linux source
+        run: |
+          python -m compileall -q linux/velox linux/tools
+          python -m pip install --disable-pip-version-check ruff==0.17.4
+          python -m ruff check linux
+          python -m ruff format --check linux
+      - name: Test signed Linux update download
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r linux/tests/requirements.txt
+          python linux/tests/test_update_download.py
+          python linux/tests/test_private_storage.py
       - name: Build and run orientation tests
         run: |
           g++ -std=c++20 -Wall -Wextra -Werror -I src tools/dev/orientation-test.cpp -o /tmp/velox-orientation-test

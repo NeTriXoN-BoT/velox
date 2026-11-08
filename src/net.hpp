@@ -18,6 +18,10 @@ enum class Hash { Sha1, Sha256 };
 std::string hashFile(const std::wstring& path, Hash kind, const std::atomic<bool>* cancel = nullptr);  // lowercase hex, empty on failure/cancel
 std::string hashBytes(const void* data, size_t n, Hash kind);
 
+// Writes a fresh sibling and atomically replaces the destination; never truncates an existing file.
+bool writeFile(const std::wstring& path, const void* data, size_t size);
+bool moveFile(const std::wstring& source, const std::wstring& path);
+
 // Downloads to `path`, resuming a `.part` file left by an interrupted try, and checks the size
 // and checksum before the file gets its final name.
 bool download(const std::wstring& url, const std::wstring& path, uint64_t size, const std::string& hexHash, Hash kind,

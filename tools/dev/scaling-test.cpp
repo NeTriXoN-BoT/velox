@@ -5,8 +5,9 @@
 int main() {
     using namespace phone::scaling;
     assert(launcher(1896, 1016, 96, 0, 16, 39) == 125);
-    assert(launcher(2536, 1376, 96, 0, 16, 39) == 150);
-    assert(launcher(3816, 2096, 144, 0, 24, 58) == 200);
+    assert(launcher(2536, 1376, 96, 0, 16, 39) == 125);
+    assert(launcher(3816, 2096, 144, 0, 24, 58) == 150);
+    assert(phone::scaling::phone(5000, 1400, 2400, 1080, 0, 96) == 60);
     assert(launcher(1342, 704, 120, 0, 20, 49) == 102);
     assert(preference(-1, 75, 300) == 0 && preference(301, 75, 300) == 0);
     assert(preference(125, 75, 300) == 125);

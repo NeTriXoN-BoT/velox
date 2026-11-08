@@ -35,6 +35,7 @@
 #include "studio.hpp"
 #include "instances.hpp"
 #include "window_scale.hpp"
+#include "paint_buffer.hpp"
 
 using namespace phone;
 
@@ -62,10 +63,10 @@ struct Hit {
 struct App {
     HWND hwnd = nullptr, numberEdit = nullptr, searchEdit = nullptr;
     float s = 1.f;
-    bool displayScaling = false, sizing = false;
+    bool displayScaling = false, systemSensors = false, sizing = false, moving = false;
     Settings set;
     bool firstRun = false;
-    Page page = LIBRARY;
+    std::atomic<Page> page{LIBRARY};
     int libraryFilter = 0, libraryPage = 0;
     std::wstring librarySearch, pendingGame;
     bool pendingEditor = false;
@@ -96,6 +97,7 @@ struct App {
     HFONT editFont = nullptr;
     HBRUSH editBrush = nullptr;
     std::unique_ptr<gp::Bitmap> background, preview;
+    painting::Buffer canvas;
     // Wallpaper gallery: the built-in designs, then pictures from the wallpaper folders.
     struct Wall {
         int builtin = -1;
@@ -112,6 +114,9 @@ struct App {
     float updateProgress = 0;
     // setup
     bool licenseAccepted = false;
+    std::atomic<bool> licenseLoading{false};
+    std::mutex licenseMutex;
+    std::wstring pendingLicense;
     int wallPage = 0;
     // The changelog, structured: versions newest first, each with New / Improved / Fixed lines.
     struct ChangeVersion {
@@ -121,6 +126,24 @@ struct App {
     std::vector<ChangeVersion> changes;
 };
 App g;
+
+void invalidate(HWND window, const RECT *area, BOOL erase) {
+    if (window == g.hwnd)
+        g.canvas.dirty = true;
+    ::InvalidateRect(window, area, erase);
+}
+
+std::atomic<bool> hostRefreshPending{false};
+void requestHostRefresh(HWND window) {
+    if (hostRefreshPending.exchange(true))
+        return;
+    std::thread([window] {
+        refreshHost(window);
+        hostRefreshPending = false;
+        if (IsWindow(window))
+            PostMessageW(window, WM_APP_REFRESH, 0, 0);
+    }).detach();
+}
 
 float dp(float v) {
     return v * g.s;
@@ -233,8 +256,8 @@ void changeLanguage(int language) {
     g.set.language = language;
     i18n::language(language);
     save();
-    InvalidateRect(g.numberEdit, nullptr, TRUE);
-    InvalidateRect(g.searchEdit, nullptr, TRUE);
+    invalidate(g.numberEdit, nullptr, TRUE);
+    invalidate(g.searchEdit, nullptr, TRUE);
     refresh();
 }
 void languagePicker(gp::Graphics &gr);
@@ -297,10 +320,10 @@ void button(gp::Graphics &gr, const gp::RectF &r, const std::wstring &label, Btn
     const gp::Font &baseFont = style == Btn::Primary ? *g.fBold : *g.fText;
     auto localized = i18n::tr(label);
     std::unique_ptr<gp::Font> adjusted;
-    if (i18n::language() == 1) {
+    {
         gp::RectF measured;
         gr.MeasureString(localized.c_str(), -1, &baseFont, gp::PointF(), &measured);
-        float available = r.Width - dp(icon ? 32 : 12);
+        float available = std::max(1.f, r.Width - dp(icon ? 36 : 16));
         if (measured.Width > available) {
             gp::FontFamily family;
             baseFont.GetFamily(&family);
@@ -313,11 +336,11 @@ void button(gp::Graphics &gr, const gp::RectF &r, const std::wstring &label, Btn
         gp::RectF m;
         auto caption = i18n::tr(label);
         gr.MeasureString(caption.c_str(), -1, &f, gp::PointF(0, 0), &m);
-        float total = dp(16) + dp(8) + m.Width, x = r.X + (r.Width - total) / 2;
+        float total = std::min(r.Width - dp(12), dp(24) + m.Width), x = r.X + (r.Width - total) / 2;
         text(gr, icon, gp::RectF(x, r.Y, dp(16), r.Height), *g.fIcon, fg, gp::StringAlignmentCenter);
-        text(gr, label, gp::RectF(x + dp(24), r.Y, r.Width, r.Height), f, fg);
+        text(gr, label, gp::RectF(x + dp(24), r.Y, std::max(1.f, r.GetRight() - dp(6) - x - dp(24)), r.Height), f, fg);
     } else {
-        text(gr, label, r, f, fg, gp::StringAlignmentCenter);
+        text(gr, label, gp::RectF(r.X + dp(8), r.Y, std::max(1.f, r.Width - dp(16)), r.Height), f, fg, gp::StringAlignmentCenter);
     }
 }
 
@@ -423,6 +446,15 @@ void startPhone() {
         say(i18n::text(L"The root image wasn't found, so the phone starts without root. Set up root again on the Phone page."), true);
     }
     g.pendingSettings.reset();
+    // The overlay may start before the worker gets its first time slice.
+    // Publish this boot before drawing it, rather than letting it see the old
+    // completed/inactive boot and disappear before the phone window exists.
+    phone::state = State::Starting;
+    boot.done = false;
+    boot.resume = false;
+    boot.progress = 0;
+    boot.set(.02f, i18n::text(L"Starting the emulator"));
+    boot.active = true;
     if (s.bootScreen) {
         std::wstring sub =
             std::wstring(displays()[s.display].name) + L"  ·  " + std::to_wstring(s.rate) + L" HZ" + (s.root ? L"  ·  ROOT" : L"");
@@ -431,7 +463,6 @@ void startPhone() {
         int style = s.bootStyle < 5 ? s.bootStyle : static_cast<int>(GetTickCount64() / 1000 % art::bootStyleNames().size());
         overlay::showBootScreen(sub, s.frame, style);
     }
-    phone::state = State::Starting;
     std::thread([s] {
         phone::start(s, reporter());
         PostMessageW(g.hwnd, WM_APP_REFRESH, 3, 0); // apply toggles changed while it was booting
@@ -824,11 +855,11 @@ LRESULT CALLBACK changelogProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         g_clog.scroll = std::clamp(g_clog.scroll + step, 0.f, maxScroll);
-        InvalidateRect(h, nullptr, FALSE);
+        invalidate(h, nullptr, FALSE);
         return 0;
     }
     case WM_SIZE:
-        InvalidateRect(h, nullptr, FALSE);
+        invalidate(h, nullptr, FALSE);
         return 0;
     case WM_CLOSE:
         DestroyWindow(h);
@@ -958,14 +989,14 @@ float CW() {
     return dp(WIN_W - SIDE_W - 64);
 }
 
-void pageHeader(gp::Graphics &gr, const std::wstring &title, const std::wstring &sub) {
-    text(gr, title, gp::RectF(X0(), dp(24), CW(), dp(30)), *g.fTitle, C_TEXT);
+void pageHeader(gp::Graphics &gr, const std::wstring &title, const std::wstring &sub, float actions = 0) {
+    text(gr, title, gp::RectF(X0(), dp(24), CW() - dp(actions), dp(30)), *g.fTitle, C_TEXT);
     text(gr, sub, gp::RectF(X0(), dp(56), CW(), dp(20)), *g.fText, C_DIM);
 }
 
 std::wstring settingsLine(const Settings &s) {
     return std::wstring(displays()[s.display].name) + L"  ·  " + std::to_wstring(s.rate) + L" Hz  ·  " + std::to_wstring(coresFor(s)) +
-           i18n::text(L" cores  ·  ") + std::to_wstring(memoryFor(s)) + L" GB" + (s.root ? L"  ·  Root" : L"");
+           i18n::text(L" cores  ·  ") + memoryLabel(memoryFor(s)) + L" GB" + (s.root ? L"  ·  Root" : L"");
 }
 
 void drawPreview(gp::Graphics &gr, const gp::RectF &r) {
@@ -1012,7 +1043,7 @@ void drawHome(gp::Graphics &gr) {
     std::pair<std::wstring, std::wstring> rows[] = {
         {i18n::text(L"Display"), std::wstring(d.name) + L"  ·  " + d.detail},
         {i18n::text(L"Refresh rate"), std::to_wstring(g.set.rate) + L" Hz"},
-        {i18n::text(L"Performance"), std::to_wstring(coresFor(g.set)) + i18n::text(L" cores  ·  ") + std::to_wstring(memoryFor(g.set)) +
+        {i18n::text(L"Performance"), std::to_wstring(coresFor(g.set)) + i18n::text(L" cores  ·  ") + memoryLabel(memoryFor(g.set)) +
                                          L" GB  ·  " +
                                          (g.set.gpu == GPU_SOFTWARE ? i18n::text(L"Software graphics") : i18n::text(L"GPU graphics"))},
         {i18n::text(L"Mode"), g.set.root ? L"Root (Magisk)" : i18n::text(L"Stock Android 15")},
@@ -1036,7 +1067,7 @@ void drawHome(gp::Graphics &gr) {
             last = hist.back();
     }
     text(gr, i18n::text(L"SCREEN FPS"), gp::RectF(rx + dp(18), y + dp(12), dp(120), dp(16)), *g.fSmallBold, C_FAINT);
-    text(gr, running() && last >= 0 ? std::to_wstring(last) : L"–", gp::RectF(rx + dp(16), y + dp(30), dp(120), dp(52)), *g.fHuge,
+    text(gr, running() && last >= 0 ? std::to_wstring(last) : L"–", gp::RectF(rx + dp(16), y + dp(28), dp(120), dp(43)), *g.fHuge,
          running() ? C_TEXT : C_FAINT);
     text(gr, running() ? i18n::text(L"of ") + std::to_wstring(phone::running.rate) + L" Hz" : i18n::text(L"phone is off"),
          gp::RectF(rx + dp(18), y + dp(72), dp(120), dp(16)), *g.fSmall, C_DIM);
@@ -1151,7 +1182,7 @@ void drawRecovery(gp::Graphics &gr) {
         return;
     }
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Velox Vault"), i18n::text(L"Private recovery points. A way back that keeps your old phone intact."));
+    pageHeader(gr, i18n::text(L"Velox Vault"), i18n::text(L"Private recovery points. A way back that keeps your old phone intact."), 155);
     button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Schedule & repair"), Btn::Secondary, !g.busy,
            [] { g.recoveryTab = 1; });
     card(gr, gp::RectF(x, dp(96), w, dp(98)));
@@ -1277,7 +1308,7 @@ void drawRecovery(gp::Graphics &gr) {
 
 void drawRecoveryTools(gp::Graphics &gr) {
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Velox Care"), i18n::text(L"Quiet protection. Clear recovery. Your data stays yours."));
+    pageHeader(gr, i18n::text(L"Velox Care"), i18n::text(L"Quiet protection. Clear recovery. Your data stays yours."), 155);
     button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Recovery points"), Btn::Secondary, !g.busy, [] {
         g.recoveryTab = 0;
         refreshVault();
@@ -1668,7 +1699,7 @@ std::wstring searchKey(const std::wstring &value) {
 void drawLibrary(gp::Graphics &gr) {
     g.libraryCards.clear();
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Your game library"), i18n::text(L"Your games. Your apps. One play space."));
+    pageHeader(gr, i18n::text(L"Your game library"), i18n::text(L"Your games. Your apps. One play space."), 132);
     button(
         gr, gp::RectF(x + w - dp(120), dp(28), dp(120), dp(34)), i18n::text(L"Install app"), Btn::Secondary, running() && !g.busy,
         [] {
@@ -1803,7 +1834,7 @@ std::wstring controlsFile(bool save, const std::wstring &package) {
 void drawControls(gp::Graphics &gr) {
     if (g.controlsTab) {
         const float x = X0(), w = CW();
-        pageHeader(gr, i18n::text(L"Velox Share"), i18n::text(L"Bring your setup. Leave personal data behind."));
+        pageHeader(gr, i18n::text(L"Velox Share"), i18n::text(L"Bring your setup. Leave personal data behind."), 155);
         button(gr, gp::RectF(x + w - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Back to controls"), Btn::Secondary, !g.busy,
                [] { g.controlsTab = 0; });
         auto profile = playtools::profile();
@@ -1867,7 +1898,7 @@ void drawControls(gp::Graphics &gr) {
     button(gr, gp::RectF(X0() + CW() - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Share game setup"), Btn::Secondary, !g.busy,
            [] { g.controlsTab = 1; });
     auto profile = playtools::profile();
-    pageHeader(gr, i18n::text(L"Control Studio"), i18n::text(L"Built around the way you play."));
+    pageHeader(gr, i18n::text(L"Control Studio"), i18n::text(L"Built around the way you play."), 155);
     card(gr, gp::RectF(x, dp(96), w, dp(74)));
     text(gr, L"\xE765", gp::RectF(x + dp(14), dp(96), dp(42), dp(74)), *g.fIconBig, C_ACCENT, gp::StringAlignmentCenter);
     std::wstring name = profile.package;
@@ -1931,7 +1962,7 @@ void drawControls(gp::Graphics &gr) {
 
 void drawScaling(gp::Graphics &gr) {
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Window scaling"), i18n::text(L"A comfortable fit on every display."));
+    pageHeader(gr, i18n::text(L"Window scaling"), i18n::text(L"A comfortable fit on every display."), 116);
     button(gr, gp::RectF(x + w - dp(104), dp(28), dp(104), dp(34)), i18n::text(L"Back"), Btn::Secondary, true,
            [] { g.displayScaling = false; });
     card(gr, gp::RectF(x, dp(96), w, dp(94)));
@@ -1978,7 +2009,7 @@ void drawScaling(gp::Graphics &gr) {
 
 void drawDisplay(gp::Graphics &gr) {
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Display"), i18n::text(L"Screen, rotation and Android navigation."));
+    pageHeader(gr, i18n::text(L"Display"), i18n::text(L"Screen, rotation and Android navigation."), 168);
     button(gr, gp::RectF(x + w - dp(156), dp(28), dp(156), dp(34)), i18n::text(L"Window scaling"), Btn::Secondary, true,
            [] { g.displayScaling = true; });
     label(gr, i18n::text(L"RESOLUTION"), x, dp(96), w);
@@ -2110,15 +2141,16 @@ void drawPerformance(gp::Graphics &gr) {
         return;
     }
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Performance"), i18n::text(L"How much of this PC the phone may use."));
+    pageHeader(gr, i18n::text(L"Performance"), i18n::text(L"How much of this PC the phone may use."), 155);
     float y = dp(96);
     button(gr, gp::RectF(X0() + CW() - dp(143), dp(29), dp(143), dp(34)), i18n::text(L"Background mode"), Btn::Secondary, !g.busy,
            [] { g.performanceBackground = true; });
-    card(gr, gp::RectF(x, y, w, dp(82)));
+    card(gr, gp::RectF(x, y, w, dp(110)));
     text(gr, L"\xE9F5", gp::RectF(x + dp(14), y, dp(24), dp(44)), *g.fIconBig, C_ACCENT, gp::StringAlignmentCenter);
     text(gr, i18n::text(L"Detected on this PC"), gp::RectF(x + dp(48), y + dp(14), w - dp(230), dp(20)), *g.fBold, C_TEXT);
-    text(gr, hostSummary(), gp::RectF(x + dp(18), y + dp(51), w - dp(36), dp(18)), *g.fSmall, C_DIM);
-    button(gr, gp::RectF(x + w - dp(176), y + dp(16), dp(160), dp(38)), i18n::text(L"Use recommended"), Btn::Secondary, true, [] {
+    text(gr, hostSummary(), gp::RectF(x + dp(18), y + dp(58), w - dp(36), dp(40)), *g.fSmall, C_DIM,
+         gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+    button(gr, gp::RectF(x + w - dp(176), y + dp(14), dp(160), dp(34)), i18n::text(L"Use recommended"), Btn::Secondary, !g.busy, [] {
         refreshHost(g.hwnd);
         Settings r = recommended();
         Settings &s = g.set;
@@ -2132,7 +2164,7 @@ void drawPerformance(gp::Graphics &gr) {
         save();
         say(i18n::text(L"Recommended settings for this PC are set."));
     });
-    y += dp(98);
+    y += dp(126);
 
     label(gr, i18n::text(L"VIRTUAL CPU CORES"), x, y, w);
     text(gr,
@@ -2155,13 +2187,13 @@ void drawPerformance(gp::Graphics &gr) {
         });
     y += dp(76);
     label(gr, i18n::text(L"MEMORY (GB)"), x, y, w);
-    text(gr, L"Auto: " + std::to_wstring(memoryFor(Settings{})) + i18n::text(L" GB · Windows memory reserved"),
+    text(gr, L"Auto: " + memoryLabel(memoryFor(Settings{})) + i18n::text(L" GB · Windows memory reserved"),
          gp::RectF(x + dp(130), y, w - dp(130), dp(18)), *g.fSmall, C_DIM);
     std::vector<std::wstring> ml;
     int msel = 0;
     for (size_t i = 0; i < memoryChoices().size(); i++) {
         int m = memoryChoices()[i];
-        ml.push_back(m == 0 ? i18n::text(L"Auto") : std::to_wstring(m));
+        ml.push_back(m == 0 ? i18n::text(L"Auto") : memoryLabel(m));
         if (m == (g.set.memory == 0 ? 0 : memoryFor(g.set)))
             msel = static_cast<int>(i);
     }
@@ -2205,9 +2237,8 @@ void drawPerformance(gp::Graphics &gr) {
             save();
         },
         L"\xE945");
-    if (needsRestart())
-        button(gr, gp::RectF(x + w - dp(200), dp(24), dp(200), dp(36)), i18n::text(L"Restart to apply"), Btn::Primary, idle(),
-               restartToApply);
+    // Restart is already available in the persistent sidebar. Keeping a second
+    // action in this header would cover Background mode when changes are pending.
 }
 
 constexpr int THUMB_W = 216, THUMB_H = 400;
@@ -2338,7 +2369,7 @@ void drawLook(gp::Graphics &gr) {
             }).detach();
         });
     float ww = (w - dp(8) * (perPage - 1)) / perPage, wh = ww * 1.72f;
-    bool can = running() && !g.busy;
+    bool can = !g.busy;
     for (int k = 0; k < perPage; k++) {
         int i = g.wallPage * perPage + k;
         if (i >= total)
@@ -2379,10 +2410,8 @@ void drawLook(gp::Graphics &gr) {
         std::wstring file = wall.file;
         int id = addHit(t, can, [builtin, file] {
             int brand = g.set.brand;
-            if (builtin >= 0)
-                tool([builtin, brand] { applyWallpaper(builtin, brand, reporter()); });
-            else
-                tool([file, brand] { applyWallpaperFile(file, brand, reporter()); });
+            int display = g.set.display;
+            tool([builtin, file, brand, display] { selectWallpaper(builtin, file, brand, display, reporter()); });
         });
         if (wall.thumb) {
             gp::GraphicsPath clip;
@@ -2425,7 +2454,7 @@ void drawLook(gp::Graphics &gr) {
             save();
         });
     if (!running())
-        text(gr, i18n::text(L"Start the phone, then click a wallpaper to apply it."), gp::RectF(x, y + dp(66), w, dp(18)), *g.fSmall,
+        text(gr, i18n::text(L"Choose a wallpaper now. It will be applied when the phone starts."), gp::RectF(x, y + dp(66), w, dp(18)), *g.fSmall,
              C_FAINT);
 }
 
@@ -2481,10 +2510,44 @@ void drawSystem(gp::Graphics &gr) {
     const float x = X0(), w = CW();
     pageHeader(gr, i18n::text(L"System"), i18n::text(L"Live usage of this PC and your phone."));
     languagePicker(gr);
-    button(gr, gp::RectF(x, dp(580), w, dp(30)), i18n::text(L"Window scaling"), Btn::Secondary, true, [] { g.displayScaling = true; });
+    button(gr, gp::RectF(x, dp(560), (w - dp(10)) / 2, dp(30)),
+           i18n::text(g.systemSensors ? L"Usage overview" : L"Live sensors"), Btn::Secondary, true, [] { g.systemSensors = !g.systemSensors; });
+    button(gr, gp::RectF(x + (w + dp(10)) / 2, dp(560), (w - dp(10)) / 2, dp(30)), i18n::text(L"Window scaling"), Btn::Secondary, true,
+           [] { g.displayScaling = true; });
     sysmon::Sample s = sysmon::latest();
     std::vector<sysmon::Sample> hist = sysmon::history();
     const HostInfo &h = host();
+    if (g.systemSensors) {
+        auto value = [](float n, const wchar_t *format) { return n >= 0 ? fmt1(format, n) : std::wstring(L"–"); };
+        float vramPct = s.vramTotalGB > 0 && s.vramUsedGB >= 0 ? std::clamp(100.f * s.vramUsedGB / s.vramTotalGB, 0.f, 100.f) : -1;
+        struct Metric { const wchar_t *name; std::wstring value, detail; };
+        Metric metrics[] = {
+            {i18n::text(L"CPU temperature"), value(s.cpuTemperature, L"%.0f °C"), i18n::text(L"Hottest reported CPU sensor")},
+            {i18n::text(L"GPU temperature"), value(s.gpuTemperature, L"%.0f °C"), h.gpu},
+            {i18n::text(L"VRAM temperature"), value(s.vramTemperature, L"%.0f °C"), i18n::text(L"Memory sensor")},
+            {i18n::text(L"VRAM usage"), value(vramPct, L"%.0f%%"),
+             s.vramUsedGB >= 0 && s.vramTotalGB > 0 ? fmt1(L"%.1f", s.vramUsedGB) + L" / " + fmt1(L"%.1f GB", s.vramTotalGB) : L"–"},
+            {i18n::text(L"CPU clock"), value(s.cpuClockMHz / 1000.f, L"%.2f GHz"), i18n::text(L"Reported clock")},
+            {i18n::text(L"GPU clock"), value(s.gpuClockMHz, L"%.0f MHz"), i18n::text(L"Graphics clock")},
+            {i18n::text(L"CPU power"), value(s.cpuPowerW, L"%.0f W"), i18n::text(L"CPU package")},
+            {i18n::text(L"GPU power"), value(s.gpuPowerW, L"%.0f W"), i18n::text(L"Reported board power")},
+            {i18n::text(L"GPU fan speed"), value(s.gpuFanPercent, L"%.0f%%"), i18n::text(L"Reported fan speed")},
+            {i18n::text(L"CPU fan"), value(s.cpuFanRPM, L"%.0f RPM"), i18n::text(L"CPU-labelled fan")},
+            {i18n::text(L"GPU fan"), value(s.gpuFanRPM, L"%.0f RPM"), i18n::text(L"Reported fan speed")},
+            {i18n::text(L"Phone memory"), s.captured && running() ? value(s.phoneRamGB, L"%.1f GB") : L"–", i18n::text(L"Desktop working set")},
+        };
+        const float gap = dp(8), width = (w - gap * 2) / 3;
+        for (size_t i = 0; i < std::size(metrics); ++i) {
+            gp::RectF cell(x + (i % 3) * (width + gap), dp(96) + (i / 3) * dp(100), width, dp(92));
+            card(gr, cell);
+            text(gr, metrics[i].name, gp::RectF(cell.X + dp(12), cell.Y + dp(10), width - dp(24), dp(18)), *g.fSmallBold, C_DIM);
+            text(gr, metrics[i].value, gp::RectF(cell.X + dp(12), cell.Y + dp(31), width - dp(24), dp(28)), *g.fBig, C_TEXT);
+            text(gr, metrics[i].detail, gp::RectF(cell.X + dp(12), cell.Y + dp(65), width - dp(24), dp(16)), *g.fTiny, C_FAINT);
+        }
+        text(gr, i18n::text(L"Unavailable sensors show –. CPU temperatures use an already running Libre Hardware Monitor or Open Hardware Monitor. Velox installs no sensor drivers."),
+             gp::RectF(x, dp(506), w, dp(40)), *g.fSmall, C_DIM, gp::StringAlignmentNear, gp::StringAlignmentNear, true);
+        return;
+    }
     float y = dp(96), gw = (w - dp(16)) / 3, gh = dp(164);
     gauge(gr, gp::RectF(x, y, gw, gh), s.cpu, s.cpu >= 0 ? fmt1(L"%.0f%%", s.cpu) : L"–", L"CPU",
           h.cpu.empty() ? i18n::text(L"Processor") : h.cpu);
@@ -2526,7 +2589,7 @@ void drawSystem(gp::Graphics &gr) {
         {L"CPU", on && s.phoneCpu >= 0 ? fmt1(L"%.0f%%", s.phoneCpu) : L"–", &pcpu, 100},
         {L"GPU", on && s.phoneGpu >= 0 ? fmt1(L"%.0f%%", s.phoneGpu) : L"–", &pgpu, 100},
         {i18n::text(L"MEMORY"), on ? fmt1(L"%.1f GB", s.phoneRamGB) : L"–", &pram,
-         static_cast<float>(std::max(2, memoryFor(phone::running)))},
+         static_cast<float>(memoryMiB(phone::running)) / 1024.0f},
         {i18n::text(L"SCREEN FPS"), on && !pfps.empty() ? fmt1(L"%.0f", pfps.back()) : L"–", &pfps,
          static_cast<float>(std::max(60, phone::running.rate))},
     };
@@ -2541,11 +2604,15 @@ void drawSystem(gp::Graphics &gr) {
 
     // Specs sheet.
     sysmon::Specs sp = sysmon::specs();
+    auto activeGraphics = phone::graphics();
+    const bool observedGraphics = on && activeGraphics.mode != GraphicsMode::Unknown;
+    if (observedGraphics)
+        sp.gpu = effectiveRate(120) == 30 ? std::wstring(i18n::text(L"Software fallback")) + L" · 30 Hz" : activeGraphics.renderer;
     sp.display = std::to_wstring(h.monitorW) + L" × " + std::to_wstring(h.monitorH) + L"  ·  " + std::to_wstring(h.monitorHz) + L" Hz";
-    gp::RectF sc(x, y, w, dp(580 - 96 - 164 - 12 - 116 - 8) - dp(2));
+    gp::RectF sc(x, y, w, dp(560 - 96 - 164 - 12 - 116 - 8) - dp(2));
     card(gr, sc);
     std::pair<const wchar_t *, std::wstring> rows[] = {
-        {i18n::text(L"Processor"), sp.cpu}, {i18n::text(L"Graphics"), sp.gpu},
+        {i18n::text(L"Processor"), sp.cpu}, {i18n::text(observedGraphics ? L"Android graphics" : L"Graphics"), sp.gpu},
         {i18n::text(L"Memory"), sp.memory}, {i18n::text(L"Display"), sp.display},
         {L"Windows", sp.windows},           {i18n::text(L"Virtualization"), sp.virtualization},
         {L"Android", sp.android},           {i18n::text(L"Emulator"), sp.emulator},
@@ -2559,7 +2626,7 @@ void drawSystem(gp::Graphics &gr) {
 }
 void drawPhone(gp::Graphics &gr) {
     const float x = X0(), w = CW();
-    pageHeader(gr, i18n::text(L"Phone"), i18n::text(L"Root, phone number and testing helpers."));
+    pageHeader(gr, i18n::text(L"Phone"), i18n::text(L"Root, phone number and testing helpers."), 252);
     button(gr, gp::RectF(x + w - dp(240), dp(28), dp(108), dp(34)), L"Velox Home", Btn::Secondary, running() && !g.busy,
            [] { tool([] { experience::openHome(reporter()); }); });
     button(gr, gp::RectF(x + w - dp(122), dp(28), dp(122), dp(34)), i18n::text(L"Velox Settings"), Btn::Secondary, running() && !g.busy,
@@ -2796,17 +2863,26 @@ void drawSetup(gp::Graphics &gr) {
         text(gr, L"\xE73E", gp::RectF(x + dp(4), y + dp(4), dp(22), dp(22)), *g.fIcon, C_TEXT, gp::StringAlignmentCenter);
     text(gr, i18n::text(L"I accept the Android SDK License Agreement from Google."), gp::RectF(x + dp(38), y, w - dp(200), dp(30)),
          *g.fText, C_TEXT);
-    button(gr, gp::RectF(x + w - dp(166), y - dp(2), dp(150), dp(34)), i18n::text(L"Read license"), Btn::Ghost, true, [] {
+    button(gr, gp::RectF(x + w - dp(166), y - dp(2), dp(150), dp(34)), i18n::text(L"Read license"), Btn::Ghost, !g.licenseLoading, [] {
+        if (g.licenseLoading.exchange(true))
+            return;
         say(i18n::text(L"Getting the license from Google…"));
         std::thread([] {
             std::wstring text, err;
             if (setup::fetchLicense(text, err)) {
-                auto *copy = new std::wstring(text);
-                PostMessageW(g.hwnd, WM_APP_REFRESH, 2, reinterpret_cast<LPARAM>(copy));
+                {
+                    std::lock_guard<std::mutex> guard(g.licenseMutex);
+                    g.pendingLicense = std::move(text);
+                }
+                // The window message owns no allocation, including when the
+                // window closes before the download finishes or handles it.
+                PostMessageW(g.hwnd, WM_APP_REFRESH, 2, 0);
                 say(L"");
             } else {
                 say(i18n::text(L"Couldn't get the license: ") + err + L". It's also at developer.android.com/studio/terms", true);
             }
+            g.licenseLoading = false;
+            PostMessageW(g.hwnd, WM_APP_REFRESH, 0, 0);
         }).detach();
     });
     y += dp(46);
@@ -3037,6 +3113,9 @@ void monitorLoop() {
     ULONGLONG lastPreview = 0;
     for (;;) {
         Sleep(1000);
+        // Process discovery belongs to a worker, including while Android boots.
+        // UI timers consume the verified snapshot instead of taking its scan lock.
+        emulatorRunning();
         phone::backgroundTick(g.hwnd);
         if (!g.backgroundClosing && vault::scheduleDue() && !g.busy.exchange(true)) {
             vault::runScheduled(reporter());
@@ -3044,9 +3123,10 @@ void monitorLoop() {
             PostMessageW(g.hwnd, WM_APP + 45, 0, 0);
         }
         bool visible = g.hwnd && IsWindowVisible(g.hwnd) && !IsIconic(g.hwnd);
-        if (visible && g.page == SYSTEM)
+        bool foreground = visible && GetForegroundWindow() == g.hwnd;
+        if (foreground && g.page == SYSTEM)
             refresh(); // live gauges, also while the phone is off
-        if (!running() || !visible) {
+        if (!running() || !foreground) {
             if (!running()) {
                 std::lock_guard<std::mutex> l(g.lock);
                 g.fps.clear();
@@ -3063,7 +3143,7 @@ void monitorLoop() {
             }
         }
         ULONGLONG now = GetTickCount64();
-        if (g.page == HOME && GetForegroundWindow() == g.hwnd && now - lastPreview > 4000 && !g.busy) {
+        if (g.page == HOME && now - lastPreview > 4000 && !g.busy) {
             lastPreview = now;
             std::string png = adb(L"exec-out screencap -p", 8000);
             if (png.size() > 1000) {
@@ -3103,7 +3183,7 @@ void createFonts() {
     g.fSmall = std::make_unique<gp::Font>(face, dp(12), gp::FontStyleRegular, gp::UnitPixel);
     g.fSmallBold = std::make_unique<gp::Font>(face, dp(11), gp::FontStyleBold, gp::UnitPixel);
     g.fTiny = std::make_unique<gp::Font>(face, dp(10.5f), gp::FontStyleRegular, gp::UnitPixel);
-    g.fHuge = std::make_unique<gp::Font>(face, dp(38), gp::FontStyleBold, gp::UnitPixel);
+    g.fHuge = std::make_unique<gp::Font>(face, dp(34), gp::FontStyleBold, gp::UnitPixel);
     gp::FontFamily fluent(L"Segoe Fluent Icons");
     const wchar_t *iconFace = fluent.IsAvailable() ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
     g.fIcon = std::make_unique<gp::Font>(iconFace, dp(15), gp::FontStyleRegular, gp::UnitPixel);
@@ -3138,6 +3218,7 @@ void loadThumbs() {
 std::vector<App::ChangeVersion> parseChanges(const std::wstring &textIn, const std::wstring &defaultVersion) {
     std::vector<App::ChangeVersion> out;
     int kind = 0;
+    bool unreleased = false;
     size_t pos = 0;
     while (pos <= textIn.size()) {
         size_t end = textIn.find(L'\n', pos);
@@ -3151,7 +3232,12 @@ std::vector<App::ChangeVersion> parseChanges(const std::wstring &textIn, const s
             line.erase(0, 1);
         if (line.empty() || line[0] == L'#')
             continue;
+        if (line == L"Unreleased") {
+            unreleased = true;
+            continue;
+        }
         if (iswdigit(line[0])) {
+            unreleased = false;
             App::ChangeVersion v;
             size_t bar = line.find(L'|');
             v.version = line.substr(0, bar);
@@ -3166,6 +3252,8 @@ std::vector<App::ChangeVersion> parseChanges(const std::wstring &textIn, const s
             kind = 0;
             continue;
         }
+        if (unreleased)
+            continue;
         if (line == L"[New]") {
             kind = 0;
             continue;
@@ -3230,7 +3318,7 @@ void resizeToContent(const RECT *anchor) {
     if (current.left != point.x || current.top != point.y || current.right - current.left != width ||
         current.bottom - current.top != height)
         SetWindowPos(g.hwnd, nullptr, point.x, point.y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    InvalidateRect(g.hwnd, nullptr, FALSE);
+    invalidate(g.hwnd, nullptr, FALSE);
     g.sizing = false;
 }
 
@@ -3239,6 +3327,11 @@ int hitAt(POINT p) {
         if (it->r.Contains(static_cast<float>(p.x), static_cast<float>(p.y)))
             return it->id;
     return -1;
+}
+
+int pointerHit(HWND window) {
+    POINT point{};
+    return GetCursorPos(&point) && ScreenToClient(window, &point) ? hitAt(point) : -1;
 }
 
 const Hit *hitById(int id) {
@@ -3280,10 +3373,18 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         playtools::windowScale(g.set.phonePercent);
         return 0;
     }
+    case WM_ENTERSIZEMOVE:
+        g.moving = true;
+        return 0;
     case WM_EXITSIZEMOVE:
+        g.moving = false;
+        resizeToContent();
+        requestHostRefresh(hwnd);
+        refresh();
+        return 0;
     case WM_DISPLAYCHANGE:
         resizeToContent();
-        refreshHost(hwnd);
+        requestHostRefresh(hwnd);
         refresh();
         return 0;
     case WM_SETTINGCHANGE:
@@ -3292,7 +3393,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_DPICHANGED:
         resizeToContent(reinterpret_cast<RECT *>(lp));
-        refreshHost(hwnd);
+        requestHostRefresh(hwnd);
         return 0;
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
@@ -3307,7 +3408,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             GetWindowTextW(g.searchEdit, search, 200);
             g.librarySearch = search;
             g.libraryPage = 0;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            invalidate(hwnd, nullptr, FALSE);
             return 0;
         }
         if (LOWORD(wp) == ID_NUMBER && HIWORD(wp) == EN_CHANGE) {
@@ -3327,7 +3428,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g.set.number = clean;
                 save();
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
+            invalidate(hwnd, nullptr, FALSE);
         }
         return 0;
     case WM_TIMER:
@@ -3337,7 +3438,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if ((g.page == RECOVERY || g.page == INSTANCES) && vault::progress.running)
-                InvalidateRect(hwnd, nullptr, FALSE);
+                invalidate(hwnd, nullptr, FALSE);
             playtools::tick();
             if (g.set.cursor > 0 && running())
                 overlay::tickCursor();
@@ -3356,10 +3457,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         say(i18n::text(L"Your phone is set up. Press Start phone to play."));
                 }
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
+            invalidate(hwnd, nullptr, FALSE);
             return 0;
         }
         if (wp == TIMER_WATCH) {
+            sysmon::setActive(g.page == SYSTEM && !g.displayScaling && IsWindowVisible(hwnd) && !IsIconic(hwnd));
             if (g.closeAfterStartup && phone::state != State::Starting && phone::state != State::Stopping) {
                 g.closeAfterStartup = false;
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -3383,7 +3485,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 return 0;
             }
-            bool alive = emulatorRunning();
+            bool alive = cachedEmulatorPid() != 0;
             if (!g.pendingGame.empty()) {
                 if (st == State::Running && !g.busy) {
                     auto component = g.pendingGame;
@@ -3409,7 +3511,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (!g.message.empty() && !g.messageError && GetTickCount64() - g.messageTime > 12000 && idle())
                     g.message.clear();
             }
-            InvalidateRect(hwnd, nullptr, FALSE);
+            if (!g.moving)
+                invalidate(hwnd, nullptr, FALSE);
         }
         return 0;
     case instances::CONTROL: {
@@ -3442,6 +3545,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case playtools::ACTION_MESSAGE: {
         using namespace playtools;
         auto action = static_cast<Action>(wp);
+        if (action == ClosePhoneView) {
+            playtools::closePhoneView();
+            return 0;
+        }
         if (action == FocusPhone) {
             auto preset = presets::load(g.activeGame);
             if (preset.enabled && preset.fullscreen >= 0)
@@ -3449,7 +3556,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             playtools::focusPhone();
             return 0;
         }
-        if (action == ScreenResolution || action == WindowScaling) {
+        if (action == SystemMonitor) {
+            g.displayScaling = false;
+            g.page = SYSTEM;
+            sysmon::setActive(true);
+            ShowWindow(g.searchEdit, SW_HIDE);
+            ShowWindow(g.numberEdit, SW_HIDE);
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        } else if (action == ScreenResolution || action == WindowScaling) {
             g.displayScaling = action == WindowScaling;
             g.page = DISPLAY;
             ShowWindow(g.searchEdit, SW_HIDE);
@@ -3555,11 +3670,22 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
              g.set.showTouches != phone::running.showTouches || g.set.autoRotate != phone::running.autoRotate))
             applyLiveAsync();
         if (wp == 2) {
-            std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring *>(lp));
-            showText(L"Android SDK License Agreement", *text);
+            std::wstring license;
+            {
+                std::lock_guard<std::mutex> guard(g.licenseMutex);
+                license.swap(g.pendingLicense);
+            }
+            if (!license.empty())
+                showText(L"Android SDK License Agreement", license);
         }
-        InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate(hwnd, nullptr, FALSE);
         return 0;
+    case WM_PRINTCLIENT: {
+        RECT client{};
+        if (wp && GetClientRect(hwnd, &client))
+            paint(reinterpret_cast<HDC>(wp), client.right, client.bottom);
+        return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {
@@ -3567,23 +3693,21 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
-        HDC mem = CreateCompatibleDC(hdc);
-        HBITMAP bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-        HGDIOBJ old = SelectObject(mem, bmp);
-        paint(mem, rc.right, rc.bottom);
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-        SelectObject(mem, old);
-        DeleteObject(bmp);
-        DeleteDC(mem);
+        if (HDC mem = g.canvas.get(hdc, rc.right, rc.bottom)) {
+            if (g.canvas.dirty) {
+                paint(mem, rc.right, rc.bottom);
+                g.canvas.dirty = false;
+            }
+            BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top,
+                   mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+        } else
+            paint(hdc, rc.right, rc.bottom);
         EndPaint(hwnd, &ps);
         // The hover may now be over a different widget than before this frame.
-        POINT p;
-        GetCursorPos(&p);
-        ScreenToClient(hwnd, &p);
-        int h = hitAt(p);
+        int h = pointerHit(hwnd);
         if (h != g.hover && GetCapture() != hwnd) {
             g.hover = h;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            invalidate(hwnd, nullptr, FALSE);
         }
         return 0;
     }
@@ -3591,7 +3715,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int h = hitAt({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
         if (h != g.hover) {
             g.hover = h;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            invalidate(hwnd, nullptr, FALSE);
         }
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tme);
@@ -3599,14 +3723,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         g.hover = -1;
-        InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate(hwnd, nullptr, FALSE);
         return 0;
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
-            POINT p;
-            GetCursorPos(&p);
-            ScreenToClient(hwnd, &p);
-            const Hit *h = hitById(hitAt(p));
+            const Hit *h = hitById(pointerHit(hwnd));
             SetCursor(LoadCursor(nullptr, h && h->enabled ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
@@ -3615,7 +3736,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetFocus(hwnd);
         g.pressed = hitAt({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
         SetCapture(hwnd);
-        InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate(hwnd, nullptr, FALSE);
         return 0;
     case WM_LBUTTONUP: {
         ReleaseCapture();
@@ -3629,7 +3750,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 act();
             }
         }
-        InvalidateRect(hwnd, nullptr, FALSE);
+        invalidate(hwnd, nullptr, FALSE);
         return 0;
     }
     case WM_RBUTTONUP: {
@@ -3717,6 +3838,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         overlay::restoreCursor();
         return 0;
     case WM_DESTROY:
+        sysmon::setActive(false);
+        g.canvas.reset();
         RemovePropW(hwnd, scaling::PROPERTY);
         RemovePropW(hwnd, scaling::REQUESTED);
         playtools::shutdown();
@@ -3875,12 +3998,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show) {
             NavigationResult navigation = syncNavigation();
             if (navigation == NavigationResult::NeedsRoot && lastNavigation != navigation)
                 say(i18n::text(L"Reverse button order needs Root enabled on the Phone page."), true);
+            if (navigation == NavigationResult::NeedsAccess && lastNavigation != navigation)
+                say(i18n::text(L"In Magisk, open Superuser, tap + and enable Shell to use reversed buttons."), true);
             if (navigation == NavigationResult::RestartRequired && lastNavigation != navigation)
                 say(i18n::text(L"Restart the phone to finish setting up reversed buttons."));
             if (navigation == NavigationResult::Unsupported && lastNavigation != navigation)
                 say(i18n::text(L"Reversed buttons aren't supported by this phone's launcher version."), true);
             if (navigation == NavigationResult::Applied &&
-                (lastNavigation == NavigationResult::NeedsRoot || lastNavigation == NavigationResult::RestartRequired ||
+                (lastNavigation == NavigationResult::NeedsRoot || lastNavigation == NavigationResult::NeedsAccess || lastNavigation == NavigationResult::RestartRequired ||
                  lastNavigation == NavigationResult::Unsupported))
                 say(i18n::text(L"Navigation updated."));
             if (navigation != NavigationResult::Unchanged)

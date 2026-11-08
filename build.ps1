@@ -6,9 +6,14 @@
 # The version comes from gaming-phone\VERSION. The address checked for updates comes from
 # gaming-phone\update-url.txt (no file: this build never checks). The public update key is
 # gaming-phone\src\update_key.h, made by release\new-signing-key.ps1.
-param([string]$Out = "$env:USERPROFILE\Tools\Velox")
+param([string]$Out = "$env:USERPROFILE\Tools\Velox", [string]$HelperKeystore = '', [string]$HelperPasswordFile = '')
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+if ([bool]$HelperKeystore -ne [bool]$HelperPasswordFile) { throw 'Supply both -HelperKeystore and -HelperPasswordFile.' }
+if ($HelperKeystore) {
+    $HelperKeystore = (Resolve-Path -LiteralPath $HelperKeystore).Path
+    $HelperPasswordFile = (Resolve-Path -LiteralPath $HelperPasswordFile).Path
+}
 $gcc = if ($env:MINGW_HOME) { Join-Path $env:MINGW_HOME 'bin' } else { "$env:USERPROFILE\Tools\mingw64\bin" }
 $env:PATH = "$gcc;$env:PATH"
 $Out = [IO.Path]::GetFullPath($Out)
@@ -58,7 +63,7 @@ if (-not (Test-Path "$build\velox.ico") -or $iconSrc.LastWriteTime -gt (Get-Item
 # ---- helper app (sets wallpapers inside the phone)
 $helperApk = "$build\helper.apk"
 $helperSrc = Get-ChildItem "$root\helper" -Recurse -File
-$stale = -not (Test-Path $helperApk) -or ($helperSrc | Where-Object { $_.LastWriteTime -gt (Get-Item $helperApk).LastWriteTime })
+$stale = $HelperKeystore -or -not (Test-Path $helperApk) -or ($helperSrc | Where-Object { $_.LastWriteTime -gt (Get-Item $helperApk).LastWriteTime })
 if ($stale) {
     $sdk = @("$env:LOCALAPPDATA\Android\Sdk", $env:ANDROID_SDK_ROOT, $env:ANDROID_HOME) | Where-Object { $_ -and (Test-Path "$_\build-tools") } | Select-Object -First 1
     if (-not $sdk) { throw 'The Android SDK (build-tools and platforms) is needed to build the helper app.' }
@@ -82,23 +87,24 @@ if ($stale) {
     try { Run "$javaBin\jar.exe" uf "$h\base.apk" classes.dex } finally { Pop-Location }
     Run "$($bt.FullName)\zipalign.exe" -p -f 4 "$h\base.apk" "$h\aligned.apk"
     $keys = Join-Path $root 'keys'
-    $ks = "$keys\helper.keystore"
+    $ks = if ($HelperKeystore) { $HelperKeystore } else { "$keys\helper.keystore" }
+    $passwordFile = if ($HelperPasswordFile) { $HelperPasswordFile } else { "$keys\helper.pass" }
     New-Item -ItemType Directory -Force $keys | Out-Null
     if (-not (Test-Path $ks)) {
         $pass = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
         Set-Content -Path "$keys\helper.pass" -Value $pass -NoNewline -Encoding Ascii
-        Run "$javaBin\keytool.exe" -genkeypair -keystore $ks -alias helper -keyalg RSA -keysize 2048 -validity 10000 `
-            -storepass $pass -keypass $pass -dname 'CN=Velox Helper'
+        Run "$javaBin\keytool.exe" @('-genkeypair', '-keystore', $ks, '-alias', 'helper', '-keyalg', 'RSA',
+            '-keysize', '2048', '-validity', '10000', '-storepass:file', $passwordFile,
+            '-keypass:file', $passwordFile, '-dname', 'CN=Velox Helper')
     }
-    $pass = (Get-Content "$keys\helper.pass" -Raw).Trim()
-    Run "$($bt.FullName)\apksigner.bat" sign --ks $ks --ks-key-alias helper --ks-pass "pass:$pass" --key-pass "pass:$pass" --out $helperApk "$h\aligned.apk"
+    Run "$($bt.FullName)\apksigner.bat" sign --ks $ks --ks-key-alias helper --ks-pass "file:$passwordFile" --out $helperApk "$h\aligned.apk"
     Remove-Item -Recurse -Force $h
     if (Test-Path "$helperApk.idsig") { Remove-Item "$helperApk.idsig" }
 }
 
 # ---- Android home, settings and the private desktop bridge
 $companionSdk = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME, "$env:LOCALAPPDATA\Android\Sdk") | Where-Object { $_ -and (Test-Path "$_\build-tools") } | Select-Object -First 1
-& "$root\companion\build.ps1" -Sdk $companionSdk
+& "$root\companion\build.ps1" -Sdk $companionSdk -HelperKeystore $HelperKeystore -HelperPasswordFile $HelperPasswordFile
 
 # ---- the launcher
 $manifestOverride = Join-Path $build 'manifest'
@@ -117,7 +123,7 @@ $exe = Join-Path $Out 'Velox.exe'
 $gccArgs = @('-B', 'build/manifest/', ('-ffile-prefix-map=' + $root + '=.'), ('-ffile-prefix-map=' + $root.Replace('\','/') + '=.'),
     '-std=c++20', '-O2', '-s', '-static', '-municode', '-mwindows', '-Wall', '-I', $build, '-I', "$root\src") + $sources +
     @("$build\app.res", '-o', $exe, '-lgdiplus', '-lcomdlg32', '-ldwmapi', '-lshell32', '-lshlwapi', '-lole32', '-luuid', '-luxtheme',
-      '-lwinhttp', '-lbcrypt', '-ldxgi', '-lcomctl32', '-lpdh', '-lwintrust', '-lcrypt32', '-ldinput8', '-ldxguid', '-lws2_32', '-liphlpapi')
+      '-lwinhttp', '-lbcrypt', '-ldxgi', '-lcomctl32', '-lpdh','-lwbemuuid','-loleaut32', '-lwintrust', '-lcrypt32', '-ldinput8', '-ldxguid', '-lws2_32', '-liphlpapi')
 # Keep the startup-object prefix relative: GCC's endfile specs don't quote spaces.
 Push-Location $root
 try { Run "$gcc\g++.exe" @gccArgs } finally { Pop-Location }

@@ -1,4 +1,6 @@
 #include <atomic>
+#include <cstddef>
+#include <filesystem>
 
 #include "net.hpp"
 
@@ -193,17 +195,73 @@ std::string hashBytes(const void *data, size_t n, Hash kind) {
 
 namespace {
 
-// Files are opened without inheritance (no child process can hold them) and allow delete and
-// rename while open, so a download can always be checked and moved into place.
-HANDLE openFile(const std::wstring &path, bool write, bool append) {
-    HANDLE h = CreateFileW(path.c_str(), write ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
-                           write ? (append ? OPEN_ALWAYS : CREATE_ALWAYS) : OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | (write ? 0 : FILE_FLAG_SEQUENTIAL_SCAN), nullptr);
-    if (h != INVALID_HANDLE_VALUE && append) {
-        LARGE_INTEGER zero{};
-        SetFilePointerEx(h, zero, nullptr, FILE_END);
+bool regularFile(HANDLE file) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    return GetFileType(file) == FILE_TYPE_DISK && GetFileInformationByHandle(file, &info) && info.nNumberOfLinks == 1 &&
+           !(info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY));
+}
+
+bool safeParent(const std::wstring &path) {
+    std::error_code error;
+    auto parent = std::filesystem::absolute(path, error).parent_path();
+    if (error || parent.empty())
+        return false;
+    for (;;) {
+        DWORD attributes = GetFileAttributesW(parent.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            return false;
+        auto next = parent.parent_path();
+        if (next == parent)
+            return true;
+        parent = next;
     }
-    return h;
+}
+
+// Deny other writers/renames until verification and publication are complete. OPEN_ALWAYS
+// leaves existing bytes untouched until the handle's type and link count have been checked.
+HANDLE openFile(const std::wstring &path, bool write) {
+    if (write && !safeParent(path))
+        return INVALID_HANDLE_VALUE;
+    HANDLE file = CreateFileW(path.c_str(), write ? GENERIC_READ | GENERIC_WRITE | DELETE : GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, write ? OPEN_ALWAYS : OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file != INVALID_HANDLE_VALUE && !regularFile(file)) {
+        CloseHandle(file);
+        return INVALID_HANDLE_VALUE;
+    }
+    return file;
+}
+
+bool publish(HANDLE file, const std::wstring &path) {
+    std::error_code error;
+    auto absolute = std::filesystem::absolute(path, error).wstring();
+    if (error || absolute.size() > 32760 || !safeParent(path) || !regularFile(file) || !FlushFileBuffers(file))
+        return false;
+    // Rename the verified open file, not a pathname that could have been substituted.
+    std::vector<BYTE> buffer(sizeof(FILE_RENAME_INFO) + absolute.size() * sizeof(wchar_t));
+    auto *rename = reinterpret_cast<FILE_RENAME_INFO *>(buffer.data());
+    rename->ReplaceIfExists = TRUE;
+    rename->RootDirectory = nullptr;
+    rename->FileNameLength = DWORD(absolute.size() * sizeof(wchar_t));
+    memcpy(rename->FileName, absolute.c_str(), rename->FileNameLength + sizeof(wchar_t));
+    return SetFileInformationByHandle(file, FileRenameInfo, rename, DWORD(buffer.size())) != 0;
+}
+
+std::string hashHandle(HANDLE file, Hash kind, const std::atomic<bool> *cancel) {
+    Hasher hash(kind);
+    LARGE_INTEGER zero{};
+    if (!hash.ok() || !SetFilePointerEx(file, zero, nullptr, FILE_BEGIN))
+        return {};
+    std::vector<char> buffer(1 << 20);
+    DWORD count = 0;
+    for (;;) {
+        if ((cancel && *cancel) || !ReadFile(file, buffer.data(), DWORD(buffer.size()), &count, nullptr))
+            return {};
+        if (!count)
+            return hash.hex();
+        hash.add(buffer.data(), count);
+    }
 }
 
 } // namespace
@@ -211,54 +269,81 @@ HANDLE openFile(const std::wstring &path, bool write, bool append) {
 std::string hashFile(const std::wstring &path, Hash kind, const std::atomic<bool> *cancel) {
     if (cancel && *cancel)
         return {};
-    Hasher h(kind);
-    HANDLE f = openFile(path, false, false);
-    if (f == INVALID_HANDLE_VALUE || !h.ok()) {
-        if (f != INVALID_HANDLE_VALUE)
-            CloseHandle(f);
+    HANDLE f = openFile(path, false);
+    if (f == INVALID_HANDLE_VALUE)
         return {};
-    }
-    std::vector<char> buf(1 << 20);
-    DWORD n = 0;
-    bool readOk = true;
-    for (;;) {
-        if (cancel && *cancel) {
-            readOk = false;
-            break;
-        }
-        if (!ReadFile(f, buf.data(), static_cast<DWORD>(buf.size()), &n, nullptr)) {
-            readOk = false;
-            break;
-        }
-        if (!n)
-            break;
-        h.add(buf.data(), n);
-    }
+    auto hash = hashHandle(f, kind, cancel);
     CloseHandle(f);
-    if (!readOk)
-        return {};
-    return h.hex();
+    return hash;
+}
+
+bool writeFile(const std::wstring &path, const void *data, size_t size) {
+    if (!safeParent(path) || size > MAXDWORD)
+        return false;
+    GUID id{};
+    wchar_t name[40]{};
+    if (FAILED(CoCreateGuid(&id)) || !StringFromGUID2(id, name, 40))
+        return false;
+    auto temporary = path + L"." + name;
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr, CREATE_NEW,
+                              FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    DWORD written = 0;
+    bool ok = regularFile(file) && WriteFile(file, data, DWORD(size), &written, nullptr) && written == size && publish(file, path);
+    if (!ok) {
+        FILE_DISPOSITION_INFO remove{TRUE};
+        SetFileInformationByHandle(file, FileDispositionInfo, &remove, sizeof(remove));
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+bool moveFile(const std::wstring &source, const std::wstring &path) {
+    HANDLE file = CreateFileW(source.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr, OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    bool ok = regularFile(file) && publish(file, path);
+    CloseHandle(file);
+    return ok;
 }
 
 bool download(const std::wstring &url, const std::wstring &path, uint64_t size, const std::string &hexHash, Hash kind,
               const std::function<void(uint64_t, uint64_t)> &progress, const std::atomic<bool> *cancel, std::wstring &error) {
-    if (exists(path) && hashFile(path, kind) == hexHash)
+    if (cancel && *cancel) {
+        error = L"cancelled";
+        return false;
+    }
+    if (exists(path) && hashFile(path, kind, cancel) == hexHash)
         return true; // already here
     std::wstring part = path + L".part";
-    uint64_t have = 0;
-    WIN32_FILE_ATTRIBUTE_DATA fa;
-    if (GetFileAttributesExW(part.c_str(), GetFileExInfoStandard, &fa))
-        have = (static_cast<uint64_t>(fa.nFileSizeHigh) << 32) | fa.nFileSizeLow;
-    if (have >= size) {
-        if (!DeleteFileW(part.c_str()) && exists(part)) {
-            error = L"an earlier download is still in use";
-            return false;
-        }
-        have = 0;
+    HANDLE f = openFile(part, true);
+    if (f == INVALID_HANDLE_VALUE) {
+        error = L"the download file is busy, linked or not writable";
+        return false;
     }
+    struct Close { HANDLE value; ~Close() { CloseHandle(value); } } close{f};
+    LARGE_INTEGER length{};
+    if (!GetFileSizeEx(f, &length) || length.QuadPart < 0)
+        return false;
+    uint64_t have = uint64_t(length.QuadPart);
+    if (have == size && hashHandle(f, kind, cancel) == hexHash) {
+        if (publish(f, path))
+            return true;
+        error = L"the downloaded file could not be saved";
+        return false;
+    }
+    if (cancel && *cancel) {
+        error = L"cancelled";
+        return false;
+    }
+    if (have >= size)
+        have = 0;
     for (int attempt = 0; attempt < 2; attempt++) {
-        HANDLE f = openFile(part, true, have > 0);
-        if (f == INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER offset{};
+        offset.QuadPart = have;
+        if (!SetFilePointerEx(f, offset, nullptr, FILE_BEGIN) || (!have && !SetEndOfFile(f))) {
             error = L"the download folder is not writable";
             return false;
         }
@@ -285,9 +370,7 @@ bool download(const std::wstring &url, const std::wstring &path, uint64_t size, 
                 return true;
             },
             error);
-        CloseHandle(f);
         if (!ok && have > 0 && error == L"resume not supported") {
-            DeleteFileW(part.c_str());
             have = 0;
             continue;
         }
@@ -299,12 +382,15 @@ bool download(const std::wstring &url, const std::wstring &path, uint64_t size, 
         }
         break;
     }
-    if (hashFile(part, kind) != hexHash) {
-        DeleteFileW(part.c_str());
-        error = L"the downloaded file failed its safety check";
+    if (hashHandle(f, kind, cancel) != hexHash) {
+        if (!(cancel && *cancel)) {
+            FILE_DISPOSITION_INFO remove{TRUE};
+            SetFileInformationByHandle(f, FileDispositionInfo, &remove, sizeof(remove));
+        }
+        error = cancel && *cancel ? L"cancelled" : L"the downloaded file failed its safety check";
         return false;
     }
-    if (!MoveFileExW(part.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    if (!publish(f, path)) {
         error = L"the downloaded file could not be saved";
         return false;
     }

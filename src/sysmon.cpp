@@ -13,6 +13,7 @@
 #include <thread>
 
 #include "phone.hpp"
+#include "hardware_sensors.hpp"
 
 namespace phone::sysmon {
 namespace {
@@ -28,13 +29,14 @@ uint64_t ft(const FILETIME &f) {
 // GPU engine and video memory counters, read through PDH like Task Manager does.
 struct Gpu {
     PDH_HQUERY query = nullptr;
-    PDH_HCOUNTER engines = nullptr, memory = nullptr;
+    PDH_HCOUNTER engines = nullptr, memory = nullptr, frequency = nullptr;
     bool ok = false;
     Gpu() {
         if (PdhOpenQueryW(nullptr, 0, &query) != ERROR_SUCCESS)
             return;
         ok = PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &engines) == ERROR_SUCCESS;
         PdhAddEnglishCounterW(query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &memory);
+        PdhAddEnglishCounterW(query, L"\\Processor Information(_Total)\\Processor Frequency", 0, &frequency);
         PdhCollectQueryData(query);
     }
     ~Gpu() {
@@ -44,6 +46,8 @@ struct Gpu {
     template <typename F> void each(PDH_HCOUNTER c, F &&f) {
         DWORD size = 0, count = 0;
         if (PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &size, &count, nullptr) != static_cast<PDH_STATUS>(PDH_MORE_DATA))
+            return;
+        if (!size || size > 16 * 1024 * 1024)
             return;
         std::vector<BYTE> buf(size);
         auto *items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W *>(buf.data());
@@ -55,13 +59,24 @@ struct Gpu {
     }
     // Like Task Manager: each engine's load is summed over all processes, and a GPU's load is
     // its busiest engine. Only the graphics card shown in the gauge counts (if it's known).
-    void sample(DWORD phonePid, float &total, float &phone, float &vramGB) {
-        if (!ok || PdhCollectQueryData(query) != ERROR_SUCCESS)
+    void sample(DWORD phonePid, Sample &sample) {
+        if (!query || PdhCollectQueryData(query) != ERROR_SUCCESS)
+            return;
+        if (frequency) {
+            PDH_FMT_COUNTERVALUE value{};
+            if (PdhGetFormattedCounterValue(frequency, PDH_FMT_DOUBLE, nullptr, &value) == ERROR_SUCCESS &&
+                value.CStatus == ERROR_SUCCESS && detail::reading(float(value.doubleValue), 20000))
+                sample.cpuClockMHz = float(value.doubleValue);
+        }
+        if (!ok)
             return;
         std::wstring adapter = host().gpuLuid; // "luid_0x..._0x...", lower case
         std::map<std::wstring, double> engine, phoneEngine;
         std::wstring pidTag = L"pid_" + std::to_wstring(phonePid) + L"_";
+        bool matched = false;
         each(engines, [&](const wchar_t *name, double v) {
+            if (!std::isfinite(v) || v < 0)
+                return;
             std::wstring n = name;
             for (auto &ch : n)
                 ch = static_cast<wchar_t>(towlower(ch));
@@ -71,6 +86,7 @@ struct Gpu {
             std::wstring key = n.substr(at);
             if (!adapter.empty() && key.rfind(adapter, 0) != 0)
                 return;
+            matched = true;
             engine[key] += v;
             if (phonePid && n.rfind(pidTag, 0) == 0)
                 phoneEngine[key] += v;
@@ -80,8 +96,8 @@ struct Gpu {
             best = std::max(best, v);
         for (auto &[k, v] : phoneEngine)
             phoneBest = std::max(phoneBest, v);
-        total = static_cast<float>(std::min(100.0, best));
-        phone = phonePid ? static_cast<float>(std::min(100.0, phoneBest)) : -1;
+        sample.gpu = matched ? static_cast<float>(std::min(100.0, best)) : -1;
+        sample.phoneGpu = matched && phonePid ? static_cast<float>(std::min(100.0, phoneBest)) : -1;
         double bytes = 0;
         bool any = false;
         if (memory)
@@ -94,12 +110,16 @@ struct Gpu {
                 bytes += v;
                 any = true;
             });
-        vramGB = any ? static_cast<float>(bytes / 1073741824.0) : -1;
+        sample.vramUsedGB = any ? static_cast<float>(bytes / 1073741824.0) : -1;
+        sample.vramTotalGB = host().vramMB ? host().vramMB / 1024.f : -1;
     }
 };
 
 void loop() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     Gpu gpu;
+    detail::Nvidia nvidia;
+    detail::MonitorProvider provider;
     FILETIME idle0, kern0, user0;
     GetSystemTimes(&idle0, &kern0, &user0);
     DWORD pid = 0;
@@ -109,8 +129,12 @@ void loop() {
     int threads = std::max(1, host().threads);
     for (;;) {
         Sleep(1000);
-        if (!g_active)
+        if (!g_active) {
+            GetSystemTimes(&idle0, &kern0, &user0);
+            procTime0 = 0;
+            wall0 = GetTickCount64();
             continue;
+        }
         Sample s;
         FILETIME idle, kern, user;
         GetSystemTimes(&idle, &kern, &user);
@@ -149,7 +173,10 @@ void loop() {
                 s.phoneRamGB = static_cast<float>(pmc.WorkingSetSize / 1073741824.0);
         }
         wall0 = wall;
-        gpu.sample(pid, s.gpu, s.phoneGpu, s.vramUsedGB);
+        gpu.sample(pid, s);
+        provider.sample(s);
+        nvidia.sample(s);
+        s.captured = GetTickCount64();
         std::lock_guard<std::mutex> l(g_lock);
         g_history.push_back(s);
         while (g_history.size() > 60)
@@ -186,7 +213,7 @@ void setActive(bool on) {
 
 Sample latest() {
     std::lock_guard<std::mutex> l(g_lock);
-    return g_history.empty() ? Sample{} : g_history.back();
+    return g_history.empty() || GetTickCount64() - g_history.back().captured > 4000 ? Sample{} : g_history.back();
 }
 
 std::vector<Sample> history() {

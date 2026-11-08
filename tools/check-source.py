@@ -4,14 +4,19 @@ import re, struct, zlib, zipfile, xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parents[1]
 assert re.fullmatch(r"\d+\.\d+\.\d+", (root / "VERSION").read_text().strip())
-version=None;section=None
+version=None;section=None;unreleased=False;released=False
 for line in (root / "CHANGELOG.txt").read_text(encoding="utf-8").splitlines():
     if not line or line.startswith("#"):continue
-    if re.fullmatch(r"\d+\.\d+\.\d+(?:\s*\|.*)?",line):
-        if version is None:assert line.split("|")[0].strip() == (root / "VERSION").read_text().strip()
-        version=line.split("|")[0].strip();section=None
-    elif line in {"[New]","[Improved]","[Fixed]"}:assert version;section=line
-    else:assert version and section and line.startswith("- "), "Changelog entry must belong to a release section"
+    if line == "Unreleased":
+        assert not released and not unreleased, "Only one leading Unreleased section is allowed"
+        unreleased=True;section=None
+    elif re.fullmatch(r"\d+\.\d+\.\d+(?:\s*\|.*)?",line):
+        if not released:assert line.split("|")[0].strip() == (root / "VERSION").read_text().strip()
+        released=True;unreleased=False;version=line.split("|")[0].strip();section=None
+    elif line in {"[New]","[Improved]","[Fixed]"} or unreleased and line == "[Linux development]":
+        assert version or unreleased;section=line
+    else:assert (version or unreleased) and section and line.startswith("- "), "Changelog entry must belong to a release section"
+assert released, "The current release must remain in the changelog"
 for p in list((root / "helper").rglob("*.xml")) + list((root / "companion").rglob("*.xml")):
     ET.parse(p)
 catalog = (root / "src/localization.inc").read_text(encoding="utf-8")

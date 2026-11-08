@@ -8,7 +8,11 @@ namespace phone::sysmon {
 struct Sample {
     float cpu = -1, gpu = -1;          // whole PC, percent
     float ramUsedGB = 0, ramTotalGB = 0;
-    float vramUsedGB = -1;             // dedicated video memory in use
+    float vramUsedGB = -1, vramTotalGB = -1;
+    float cpuTemperature = -1, gpuTemperature = -1, vramTemperature = -1;
+    float cpuClockMHz = -1, gpuClockMHz = -1, cpuPowerW = -1, gpuPowerW = -1;
+    float cpuFanRPM = -1, gpuFanRPM = -1, gpuFanPercent = -1;
+    ULONGLONG captured = 0;
     float phoneCpu = -1, phoneGpu = -1;  // the emulator's share, percent of the whole PC
     float phoneRamGB = 0;
 };

@@ -119,7 +119,7 @@ void build() {
     action("Accounts", () -> androidPage(Settings.ACTION_SYNC_SETTINGS));
     action("All Android settings", () -> androidPage(Settings.ACTION_SETTINGS));
     section("Connected to your desktop",
-            System.currentTimeMillis() - prefs.getLong("desktopSeen", 0) < 15000
+            Catalog.desktopConnected()
                 ? "Desktop Velox is connected. Navigation and orientation changes sync automatically."
                 : "Open desktop Velox to apply navigation and orientation changes. Home appearance works independently.");
     root.addView(Design.text(this, "VELOX  /  YOUR GAME. YOUR SPACE.", 11, Design.VIOLET, true));

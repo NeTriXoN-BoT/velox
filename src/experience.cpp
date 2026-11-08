@@ -219,6 +219,9 @@ bool ensureCompanion(const Report &report) {
         return false;
     }
     apkPath = installed;
+    // A previous controls process may have ended before restoring its temporary
+    // Android game cap. The guest journal restores only values it still owns.
+    shell(L"CLASSPATH=" + shellArg(apkPath) + L" app_process /system/bin app.velox.home.FramePolicy restore", 8000);
     readyPid = pid;
     refreshWanted = true;
     return true;
@@ -307,11 +310,25 @@ void openSettings(const Report &report) {
     if (ensureCompanion(report))
         shell(L"am start -n app.velox.home/.SettingsActivity");
 }
-std::wstring inputCommand() {
+std::wstring inputCommand(bool observe) {
     std::lock_guard<std::mutex> l(installLock);
     if (apkPath.empty() || state != State::Running || readyPid != emulatorPid())
         return {};
     return quote(paths().sdk + L"\\platform-tools\\adb.exe") + L" -s " + adbSerial() + L" shell " +
-           quote(L"CLASSPATH=" + shellArg(apkPath) + L" app_process /system/bin app.velox.home.InputBridge");
+           quote(L"CLASSPATH=" + shellArg(apkPath) + L" app_process /system/bin app.velox.home.InputBridge" + (observe ? L" --display" : L""));
+}
+bool framePolicy(const std::wstring &package, int rate) {
+    if (rate != 0 && rate != 15 && rate != 30 && rate != 60 && rate != 90 && rate != 120 && rate != 144)
+        return false;
+    if (!package.empty() && !validComponent(package + L"/.Velox"))
+        return false;
+    std::lock_guard<std::mutex> guard(installLock);
+    if (apkPath.empty() || (state != State::Running && !(state == State::Stopping && (!rate || package.empty()))) ||
+        readyPid != emulatorPid())
+        return false;
+    std::wstring arguments = package.empty() || !rate ? L"restore" : L"apply " + package + L" " + std::to_wstring(rate);
+    auto result = shell(L"CLASSPATH=" + shellArg(apkPath) + L" app_process /system/bin app.velox.home.FramePolicy " + arguments, 8000);
+    return result.rfind("VELOX_FRAME_APPLIED ", 0) == 0 || result.rfind("VELOX_FRAME_RESTORED", 0) == 0 ||
+           result.rfind("VELOX_FRAME_UNSUPPORTED", 0) == 0 || result.rfind("VELOX_FRAME_EXTERNAL", 0) == 0;
 }
 } // namespace phone::experience

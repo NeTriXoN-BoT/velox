@@ -7,6 +7,12 @@ import java.util.*;
 
 final class Catalog {
     static final Object SETTINGS_LOCK = new Object();
+    static volatile long desktopSeen;
+    static void desktopSeen() { desktopSeen = android.os.SystemClock.elapsedRealtime(); }
+    static boolean desktopConnected() {
+        long elapsed = android.os.SystemClock.elapsedRealtime() - desktopSeen;
+        return desktopSeen != 0 && elapsed >= 0 && elapsed < 15000;
+    }
     static long nextRevision(Context c) {
         long previous = Math.max(prefs(c).getLong("revision", 0), prefs(c).getLong("desktopAck", 0));
         return Math.max(System.currentTimeMillis(), previous < Long.MAX_VALUE ? previous + 1 : previous);

@@ -101,6 +101,32 @@ final class Design {
             c.restore();
         }
     }
+    static class SettingsButton extends View {
+        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        SettingsButton(Context context, Runnable action) {
+            super(context);
+            setContentDescription(Strings.text(context, "Settings"));
+            setFocusable(true);
+            setBackground(new RippleDrawable(android.content.res.ColorStateList.valueOf(0x338b6cff), shape(CARD, dp(context, 16)), null));
+            setOnClickListener(view -> action.run());
+        }
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            canvas.save(); canvas.translate(getWidth() / 2f, getHeight() / 2f);
+            float unit = dp(getContext(), 1);
+            paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(1.8f * unit); paint.setStrokeJoin(Paint.Join.ROUND);
+            paint.setColor(TEXT);
+            Path gear = new Path();
+            for (int point = 0; point < 32; point++) {
+                double angle = point * Math.PI / 16;
+                float radius = (point % 4 == 1 || point % 4 == 2 ? 11.5f : 9f) * unit;
+                float x = (float)Math.cos(angle) * radius, y = (float)Math.sin(angle) * radius;
+                if (point == 0) gear.moveTo(x, y); else gear.lineTo(x, y);
+            }
+            gear.close(); canvas.drawPath(gear, paint); canvas.drawCircle(0, 0, 3.6f * unit, paint);
+            canvas.restore();
+        }
+    }
     static void header(Activity a, LinearLayout root, String title, String sub) {
         LinearLayout row = new LinearLayout(a);
         row.setGravity(Gravity.CENTER_VERTICAL);

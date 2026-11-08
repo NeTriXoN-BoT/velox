@@ -31,10 +31,10 @@ public class HomeActivity extends Activity {
     Runnable time = new Runnable() {
         public void run() {
             if (clock != null) {
-                clock.setText(new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date()));
+                clock.setText(android.text.format.DateFormat.getTimeFormat(HomeActivity.this).format(new Date()));
                 date.setText(new SimpleDateFormat("EEEE, d MMMM", Strings.locale(HomeActivity.this)).format(new Date()));
             }
-            handler.postDelayed(this, 1000);
+            handler.postDelayed(this, 60000 - System.currentTimeMillis() % 60000);
         }
     };
     public void onCreate(Bundle b) { super.onCreate(b); }
@@ -76,7 +76,8 @@ public class HomeActivity extends Activity {
         TextView brand = Design.text(this, "  VELOX", 20, Design.TEXT, true);
         brand.setLetterSpacing(.12f);
         bar.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
-        bar.addView(Design.button(this, "Settings", false, () -> startActivity(new Intent(this, SettingsActivity.class))));
+        bar.addView(new Design.SettingsButton(this, () -> startActivity(new Intent(this, SettingsActivity.class))),
+                    new LinearLayout.LayoutParams(Design.dp(this, 48), Design.dp(this, 48)));
         root.addView(bar);
         Design.gap(root, 22);
         if (Catalog.prefs(this).getBoolean("clock", true) &&
@@ -96,11 +97,12 @@ public class HomeActivity extends Activity {
         search.setTextColor(Design.TEXT);
         search.setHintTextColor(Design.DIM);
         search.setTextSize(15);
-        search.setHint(Strings.text(this,"Search your games and apps"));
+        search.setHint(Strings.text(this, getResources().getConfiguration().fontScale > 1.2f ? "Search apps" : "Search your games and apps"));
         search.setBackground(Design.shape(0xd91b1e30, Design.dp(this, 18)));
         search.setPadding(pad, Design.dp(this, 14), pad, Design.dp(this, 14));
         search.setText(query);
-        root.addView(search, new LinearLayout.LayoutParams(-1, Design.dp(this, 52)));
+        search.setMinHeight(Design.dp(this, 52));
+        root.addView(search, new LinearLayout.LayoutParams(-1, -2));
         search.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int st, int count, int after) {
             }
@@ -112,17 +114,32 @@ public class HomeActivity extends Activity {
             }
         });
         Design.gap(root, 16);
-        LinearLayout tabs = new LinearLayout(this);
+        LinearLayout tabs = Design.column(this);
         String[] names = {"All apps", "Games", "Favorites", "Recent"};
+        // Keep filter names intact on a narrow phone. Larger accessibility
+        // text gets two rows instead of being squeezed into four columns.
+        Configuration config = getResources().getConfiguration();
+        int filterColumns = config.fontScale > 1.2f || config.screenWidthDp < 340 ? 2 : 4;
+        LinearLayout filterRow = null;
         for (int i = 0; i < names.length; i++) {
+            if (i % filterColumns == 0) {
+                filterRow = new LinearLayout(this);
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
+                if (i > 0) rowParams.topMargin = Design.dp(this, 6);
+                tabs.addView(filterRow, rowParams);
+            }
             final int id = i;
             TextView t = Design.button(this, names[i], tab == i, () -> {
                 tab = id;
                 build();
             });
+            t.setSingleLine(true);
+            t.setEllipsize(TextUtils.TruncateAt.END);
+            t.setTextSize(13);
+            t.setPadding(Design.dp(this, 8), Design.dp(this, 13), Design.dp(this, 8), Design.dp(this, 13));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
-            lp.setMargins(0, 0, Design.dp(this, 5), 0);
-            tabs.addView(t, lp);
+            if (i % filterColumns < filterColumns - 1) lp.setMargins(0, 0, Design.dp(this, 5), 0);
+            filterRow.addView(t, lp);
         }
         root.addView(tabs);
         Design.gap(root, 20);
@@ -154,12 +171,13 @@ public class HomeActivity extends Activity {
         if (tab == 3)
             list.sort((a, b) -> Long.compare(b.played, a.played));
         int columns = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE ? 7 : 4;
+        if (getResources().getConfiguration().fontScale > 1.2f) columns = columns == 7 ? 5 : 3;
         if (Catalog.prefs(this).getBoolean("largeTiles", false))
             columns = Math.max(3, columns - 1);
         LinearLayout row = null;
         int n = 0;
         for (Catalog.App a : list) {
-            if (!a.label.toLowerCase(Locale.ROOT).contains(normalizedQuery))
+            if (!a.label.toLowerCase(Locale.ROOT).contains(normalizedQuery) && !a.packageName.toLowerCase(Locale.ROOT).contains(normalizedQuery))
                 continue;
             if (tab == 1 && !a.game || tab == 2 && !a.favorite || tab == 3 && a.played == 0)
                 continue;
@@ -184,7 +202,7 @@ public class HomeActivity extends Activity {
             label.setGravity(Gravity.CENTER);
             label.setMaxLines(2);
             label.setEllipsize(TextUtils.TruncateAt.END);
-            cell.addView(label, new LinearLayout.LayoutParams(-1, Design.dp(this, 34)));
+            cell.addView(label, new LinearLayout.LayoutParams(-1, (int)Math.ceil(label.getPaint().getFontSpacing() * 2) + Design.dp(this, 5)));
             cell.setOnClickListener(v -> {
                 if (!Catalog.launch(this, a.component))
                     Toast.makeText(this, Strings.text(this,"This app couldn't be opened."), Toast.LENGTH_SHORT).show();

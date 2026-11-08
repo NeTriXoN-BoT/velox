@@ -15,3 +15,7 @@
 *.key
 *.idsig
 *.vbackup/
+__pycache__/
+.ruff_cache/
+*.py[cod]
+/linux/.build/

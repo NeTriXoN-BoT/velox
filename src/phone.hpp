@@ -20,7 +20,7 @@ struct Display {
 const std::vector<Display> &displays();
 const std::vector<int> &refreshRates();
 const std::vector<int> &coreChoices();   // 0 = automatic
-const std::vector<int> &memoryChoices(); // GB, 0 = automatic
+const std::vector<int> &memoryChoices(); // GB, 0 = automatic; legacy 2 selects the 2.5 GB image minimum
 enum Gpu { GPU_AUTO = 0, GPU_HOST = 1, GPU_SOFTWARE = 2 };
 
 // ---- this PC
@@ -34,7 +34,16 @@ struct HostInfo {
 };
 HostInfo host();
 void refreshHost(HWND window = nullptr); // re-reads free disk space and the monitor
-std::wstring hostSummary();              // "Ryzen 9 9950X3D · 32 threads · 47 GB · RTX 5070 Ti · 240 Hz"
+std::wstring hostSummary();              // CPU, available threads/RAM, GPU and desktop resolution/refresh
+
+enum class GraphicsMode { Unknown, Hardware, Software };
+struct GraphicsInfo {
+    GraphicsMode mode = GraphicsMode::Unknown;
+    std::wstring renderer, vendor, api;
+};
+GraphicsInfo parseGraphicsLog(const std::string &log);
+GraphicsInfo graphics(); // actual Android renderer from this owned boot; unknown until observed
+int effectiveRate(int preferred); // preserve the preference during an automatic software fallback
 
 // ---- settings (saved in this phone's portable data folder)
 
@@ -60,6 +69,8 @@ std::wstring iniPath();
 int cpuLimit(); // effective host/observed Android engine limit
 int coresFor(const Settings &s);
 int memoryFor(const Settings &s);
+int memoryMiB(const Settings &s);
+std::wstring memoryLabel(int choice);
 bool coreAllowed(int choice);
 bool memoryAllowed(int gb);
 std::wstring signature(const Settings &s); // what a quick-boot snapshot depends on
@@ -104,6 +115,7 @@ extern Boot boot;
 void start(const Settings &s, const Report &report); // blocks until booted or failed
 void cancelStartup();                                // affects only this launcher's owned startup
 void backgroundPolicy(int rate, bool mute, int foregroundRate = 0);
+void backgroundGame(const std::wstring &package);
 void backgroundTick(HWND launcher, bool restore = false);
 bool repairStartup(const Settings &settings, const Report &report);
 // Whether `running` really holds what the phone was started with. After Velox is reopened,
@@ -116,6 +128,7 @@ void stop(const Report &report); // blocks until closed
 void onExitedOutside();          // the emulator window was closed directly
 bool emulatorRunning();
 DWORD emulatorPid();               // qemu-system-x86_64.exe
+DWORD cachedEmulatorPid();         // UI observation only; never scans processes or waits for discovery
 void applyLive(const Settings &s); // settings that change without a restart
 
 // ---- tools (need a running phone)
@@ -132,14 +145,17 @@ bool recording();
 void syncRecordingState();
 void rotate();
 void setAutoRotation(bool enabled);
+void observedRotation(int rotation, DWORD pid);
 void syncOrientation(); // background tick: follow Android's default display, even while minimized
 void setGestureNavigation(bool enabled, bool reverseButtons = false);
-enum class NavigationResult { Unchanged, Applied, NeedsRoot, RestartRequired, Unsupported };
+enum class NavigationResult { Unchanged, Applied, NeedsRoot, RestartRequired, Unsupported, NeedsAccess };
 NavigationResult syncNavigation(); // apply when Android is ready, including adopted phones
 bool navigationNeedsRestart();
 int sampleFps(); // frames shown in the last second, or -1
-bool applyWallpaper(int index, int brand, const Report &report);
-bool applyWallpaperFile(const std::wstring &image, int brand, const Report &report);
+bool selectWallpaper(int builtin, const std::wstring &image, int brand, int display, const Report &report);
+bool pendingWallpaper();
+bool wallpaperChoiceFile(const std::wstring &name);
+bool applyPendingWallpaper(const Report &report);
 // Wallpaper packs: pictures in <Velox folder>\wallpapers (shipped) and <data>\wallpapers (added).
 std::wstring wallpaperFolder();
 std::vector<std::wstring> wallpaperFiles();

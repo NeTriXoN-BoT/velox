@@ -4,9 +4,9 @@ Open **Display → Window scaling**, **System → Window scaling**, or right-cli
 
 | Setting | Meaning |
 | :-- | :-- |
-| Velox interface: Auto | Balances the monitor's Windows DPI with desktop space. A normal 1080p work area starts around 125%, 1440p around 150%, and 4K around 200%, subject to Windows scaling and available space. |
+| Velox interface: Auto | Balances monitor DPI with desktop space. A normal 1080p or 1440p work area starts around 125%, and 4K around 150%, subject to the system's scaling and available space. Higher system accessibility scaling remains respected. |
 | Velox interface: percentage | The 900 × 640 reference layout is redrawn at this physical-pixel percentage. Native input fields and Velox dialogs follow the effective size. |
-| Phone window: Auto | Fits the phone and toolbar within the desktop, leaving space around them. Refits after rotation, monitor/DPI changes, or toolbar docking changes. |
+| Phone window: Auto | Fits the phone and toolbar within the desktop, leaving space around them and limiting automatic sizing on large or ultrawide displays. Refits after rotation, monitor/DPI changes, or toolbar docking changes. |
 | Phone window: percentage | The displayed Android render area as a percentage of its native render resolution; for example, 25% of 1080 × 2400 is 270 × 600 pixels before the frame. |
 
 Auto is the default for both. If a requested percentage exceeds the usable desktop, Velox applies a smaller percentage and displays the actual value. The taskbar, window caption, borders and toolbar are included in the fit. The saved request is retained, so it can fit on a larger screen later. Valid custom percentages already saved in settings also appear in the choices.

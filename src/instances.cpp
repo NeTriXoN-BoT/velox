@@ -651,7 +651,7 @@ Storage storage(const std::wstring &key) {
                 out.desktop += e.file_size();
                 if (e.path().filename() == L"emulator.log" || e.path().filename() == L"preview.png")
                     out.reclaimable += e.file_size();
-            } else if (e.is_directory() && (e.path().filename() == L"controls" || e.path().filename() == L"presets"))
+            } else if (e.is_directory() && (e.path().filename() == L"controls" || e.path().filename() == L"presets" || e.path().filename() == L"wallpaper-choice"))
                 scan(e.path().wstring(), false);
         }
     } catch (const std::exception &e) {
@@ -728,14 +728,15 @@ bool clone(const std::wstring &key, const std::wstring &label, bool full, const 
             put(settings, L"launcher", L"root", L"1");
             put(settings, L"launcher", L"rootimage", home + L"\\root\\ramdisk-root.img");
         }
-        for (auto name : {L"controls", L"presets"}) {
+        for (auto name : {L"controls", L"presets", L"wallpaper-choice"}) {
             auto from = info.data + L"\\" + name, to = target + L"\\data\\" + name;
             plain(from);
             if (isDir(from))
                 for (const auto &e : fs::directory_iterator(from)) {
                     plain(e.path().wstring());
-                    if (e.is_regular_file() && e.path().extension() == L".ini") {
-                        need(e.file_size() <= (1u << 20), "A control or preset file is too large.");
+                    bool wallpaper = std::wstring(name) == L"wallpaper-choice";
+                    if (e.is_regular_file() && (wallpaper ? wallpaperChoiceFile(e.path().filename().wstring()) : e.path().extension() == L".ini")) {
+                        need(e.file_size() <= (wallpaper ? 32u << 20 : 1u << 20), "A profile file is too large.");
                         createDirs(to);
                         need(CopyFileW(e.path().c_str(), (fs::path(to) / e.path().filename()).c_str(), TRUE),
                              "Couldn't copy controls or presets.");

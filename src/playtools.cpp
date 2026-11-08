@@ -3,6 +3,7 @@
 #include "experience.hpp"
 #include "controllers.hpp"
 #include "presets.hpp"
+#include "phone_window.hpp"
 #include <set>
 #include <stdexcept>
 #include "art.hpp"
@@ -10,6 +11,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
+#include <sddl.h>
 #include <array>
 #include <cmath>
 #include <deque>
@@ -23,6 +25,18 @@
 namespace phone::playtools {
 namespace {
 HWND launcher = nullptr, bar = nullptr, editor = nullptr, tip = nullptr, emu = nullptr, display = nullptr, stockBar = nullptr;
+shell::Identity taskbarIdentity;
+HWINEVENTHOOK dockEvents = nullptr;
+DWORD dockEventsPid = 0;
+bool dockMoveQueued = false;
+constexpr UINT DOCK_MOVED = WM_APP + 101;
+void CALLBACK dockMoved(HWINEVENTHOOK, DWORD, HWND window, LONG object, LONG child, DWORD, DWORD) {
+    if (bar && (window == emu || window == display) && object == OBJID_WINDOW && child == CHILDID_SELF && !dockMoveQueued) {
+        dockMoveQueued = true;
+        if (!PostMessageW(bar, DOCK_MOVED, 0, 0))
+            dockMoveQueued = false;
+    }
+}
 std::atomic<DWORD> phonePid{0};
 std::atomic<HWND> focusEmu{nullptr};
 RECT viewport{};
@@ -49,6 +63,10 @@ std::array<bool, 14> sticks{};
 std::atomic<bool> quitting{false}, cancelWanted{false};
 std::thread inputThread;
 HHOOK keyboardHook = nullptr, mouseHook = nullptr;
+std::thread hookThread;
+std::atomic<bool> hooksWanted{false}, hooksStopping{false};
+std::atomic<bool> observerReady{false};
+HANDLE hookWake = nullptr;
 struct Contact {
     char op;
     int id;
@@ -64,7 +82,7 @@ struct Tool {
     const wchar_t *icon;
     const wchar_t *name;
 };
-const std::array<Tool, 15> tools{{{Back, L"\xE72B", i18n::text(L"Back")},
+const std::array<Tool, 16> tools{{{Back, L"\xE72B", i18n::text(L"Back")},
                                   {Home, L"\xE80F", i18n::text(L"Home")},
                                   {Recents, L"\xE8A5", i18n::text(L"Recent apps")},
                                   {VolumeUp, L"\xE995", i18n::text(L"Volume up")},
@@ -78,7 +96,8 @@ const std::array<Tool, 15> tools{{{Back, L"\xE72B", i18n::text(L"Back")},
                                   {EnableMapping, L"\xE7FC", i18n::text(L"Enable mapped controls")},
                                   {Settings, L"\xE713", i18n::text(L"Velox Settings")},
                                   {Power, L"\xE7E8", i18n::text(L"Power button")},
-                                  {ScreenResolution, L"\xE7F4", i18n::text(L"Screen resolution")}}};
+                                  {ScreenResolution, L"\xE7F4", i18n::text(L"Screen resolution")},
+                                  {SystemMonitor, L"\xE9D9", i18n::text(L"System monitor")}}};
 std::vector<int> order = [] {
     std::vector<int> values;
     for (size_t i = 0; i < tools.size(); i++)
@@ -286,7 +305,16 @@ LRESULT CALLBACK mouseProc(int code, WPARAM w, LPARAM l) {
 
 struct InputPipe {
     HANDLE process = nullptr, write = nullptr, read = nullptr;
+    bool observing = false;
+    DWORD observedPhone = 0;
+    std::string output;
     void close() {
+        if (observing) {
+            observing = false;
+            observerReady = false;
+            observedRotation(-1, 0);
+        }
+        output.clear();
         if (write) {
             CloseHandle(write);
             write = nullptr;
@@ -323,12 +351,21 @@ struct InputPipe {
     }
     bool open(const std::wstring &custom = {}, bool immediate = false) {
         close();
-        std::wstring command = custom.empty() ? experience::inputCommand() : custom;
+        std::wstring command = custom.empty() ? experience::inputCommand(true) : custom;
         if (command.empty())
             return false;
-        std::wstring pipe = L"\\\\.\\pipe\\VeloxInput-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
-        write = CreateNamedPipeW(pipe.c_str(), PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0,
-                                 nullptr);
+        GUID identity{};
+        wchar_t nonce[40]{};
+        if (FAILED(CoCreateGuid(&identity)) || !StringFromGUID2(identity, nonce, 40))
+            return false;
+        std::wstring pipe = L"\\\\.\\pipe\\VeloxInput-" + std::wstring(nonce);
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GA;;;SY)(A;;GA;;;OW)", SDDL_REVISION_1, &descriptor, nullptr))
+            return false;
+        SECURITY_ATTRIBUTES server{sizeof(server), descriptor, FALSE};
+        write = CreateNamedPipeW(pipe.c_str(), PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                 PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, &server);
+        LocalFree(descriptor);
         if (write == INVALID_HANDLE_VALUE) {
             write = nullptr;
             return false;
@@ -376,7 +413,8 @@ struct InputPipe {
         process = pi.hProcess;
         if (immediate)
             return true;
-        std::string output;
+        observing = custom.empty();
+        observedPhone = emulatorPid();
         ULONGLONG begin = GetTickCount64();
         while (GetTickCount64() - begin < 5000 && !quitting) {
             DWORD available = 0;
@@ -388,6 +426,8 @@ struct InputPipe {
                 if (!ReadFile(read, buffer, std::min<DWORD>(available, sizeof(buffer)), &n, nullptr))
                     break;
                 output.append(buffer, n);
+                if (output.size() > 65536)
+                    break;
                 if (output.find("VELOX_INPUT_READY") != std::string::npos)
                     return true;
                 if (output.find("VELOX_INPUT_ERROR") != std::string::npos)
@@ -403,6 +443,44 @@ struct InputPipe {
         }
         close();
         return false;
+    }
+    bool receive() {
+        if (!process || WaitForSingleObject(process, 0) != WAIT_TIMEOUT || (observing && emulatorPid() != observedPhone))
+            return false;
+        DWORD available = 0;
+        if (!PeekNamedPipe(read, nullptr, 0, nullptr, &available, nullptr))
+            return false;
+        if (available) {
+            char buffer[2048];
+            DWORD count = 0;
+            if (!ReadFile(read, buffer, std::min<DWORD>(available, sizeof(buffer)), &count, nullptr))
+                return false;
+            output.append(buffer, count);
+        }
+        if (output.size() > 65536)
+            return false;
+        for (size_t end; (end = output.find('\n')) != std::string::npos;) {
+            auto line = output.substr(0, end);
+            output.erase(0, end + 1);
+            if (line.rfind("VELOX_INPUT_ERROR", 0) == 0)
+                return false;
+            if (observing && line.rfind("STATE ", 0) == 0) {
+                std::istringstream fields(line.substr(6));
+                int width = 0, height = 0, rotation = -1;
+                std::string name, extra;
+                if (!(fields >> width >> height >> rotation >> name) || (fields >> extra) || width < 1 || width > 16384 ||
+                    height < 1 || height > 16384 || rotation < 0 || rotation > 3 || name.size() > 199)
+                    return false;
+                auto package = widen(name);
+                if (name != "-" && !safePackage(package))
+                    return false;
+                observedRotation(rotation, observedPhone);
+                observerReady = true;
+                if (name != "-")
+                    selectProfile(package, width > height);
+            }
+        }
+        return true;
     }
 };
 void touchController(const controllers::Frame &f) {
@@ -438,13 +516,17 @@ void inputLoop() {
             std::lock_guard<std::mutex> g(lock);
             p = current;
         }
-        auto frame = controllers::filtered(reader.read(p.padDevice, p.padLayout), p.deadzone, p.sensitivity, p.invertY);
+        auto frame = controllers::filtered(p.padMode ? reader.read(p.padDevice, p.padLayout) : controllers::Frame{},
+                                           p.deadzone, p.sensitivity, p.invertY);
         {
             std::lock_guard<std::mutex> g(lock);
             bool focus = !editingNow && gameFocus();
             active = (current.enabled || current.padMode == 2) && focus;
             padActive = current.padMode != 0 && focus && frame.connected;
-            wanted = ((current.enabled && !current.bindings.empty()) || current.padMode == 2) && !editingNow && state == State::Running;
+            // Keep the lightweight display observer connected even without
+            // mappings. It replaces repeated dumpsys processes for rotation
+            // and foreground-game discovery; input remains focus-scoped.
+            wanted = state == State::Running;
             padWanted = current.padMode == 1 && frame.connected && !editingNow && state == State::Running;
             if (!active && (wasActive || !events.empty() || aimLocked || !swipes.empty() ||
                             std::any_of(held.begin(), held.end(), [](bool v) { return v; }))) {
@@ -483,7 +565,8 @@ void inputLoop() {
             retry = GetTickCount64() + 5000;
             if (pipe.open()) {
                 std::lock_guard<std::mutex> g(lock);
-                message = i18n::text(L"Touch controls ready · Esc releases mouse aim");
+                if (current.enabled || current.padMode == 2)
+                    message = i18n::text(L"Touch controls ready · Esc releases mouse aim");
                 cancel();
                 batch.clear();
                 reset = true;
@@ -501,23 +584,11 @@ void inputLoop() {
                 out << '\n';
                 ok = pipe.send(out.str());
             }
-            DWORD available = 0;
-            if (!ok || WaitForSingleObject(pipe.process, 0) != WAIT_TIMEOUT ||
-                !PeekNamedPipe(pipe.read, nullptr, 0, nullptr, &available, nullptr)) {
+            if (!ok || !pipe.receive()) {
                 pipe.close();
                 std::lock_guard<std::mutex> g(lock);
                 cancel();
                 message = i18n::text(L"Touch controls disconnected. Reconnecting automatically…");
-            } else if (available) {
-                char b[2048];
-                DWORD n = 0;
-                ReadFile(pipe.read, b, std::min<DWORD>(available, sizeof(b)), &n, nullptr);
-                if (std::string(b, n).find("VELOX_INPUT_ERROR") != std::string::npos) {
-                    pipe.close();
-                    std::lock_guard<std::mutex> g(lock);
-                    cancel();
-                    message = i18n::text(L"Android refused touch input. Re-enable controls to reconnect.");
-                }
             }
         }
         if (!padWanted) {
@@ -574,7 +645,7 @@ void inputLoop() {
                 ReadFile(native.read, output, std::min<DWORD>(available, sizeof(output)), &n, nullptr);
             }
         }
-        Sleep(wanted || padWanted ? 8 : 50);
+        Sleep(state != State::Running ? 50 : active || padActive || !batch.empty() ? 8 : 30);
     }
     if (pipe.process)
         pipe.send("C\nQ\n");
@@ -593,12 +664,14 @@ void drawText(gp::Graphics &gr, const std::wstring &s, const gp::RectF &r, float
     gr.DrawString(translated.c_str(), -1, &f, r, &fmt, &brush);
 }
 int visibleTools(int height) {
-    return collapsed ? 0 : std::max(1, std::min<int>(order.size(), (height - 88) / 38));
+    return collapsed ? 0 : std::max(1, std::min<int>(order.size(), (height - 116) / 38));
 }
 int atTool(int y, int height) {
-    if (y < 48)
+    if (y < 28)
+        return -4;
+    if (y < 76)
         return -1;
-    int i = (y - 48) / 38;
+    int i = (y - 76) / 38;
     return i < visibleTools(height) ? i : -2;
 }
 void menu(HWND h, int selectedTool) {
@@ -607,6 +680,7 @@ void menu(HWND h, int selectedTool) {
     AppendMenuW(m, MF_STRING, 101, leftDock ? i18n::text(L"Dock on right") : i18n::text(L"Dock on left"));
     AppendMenuW(m, MF_STRING | (stockBar ? 0 : MF_GRAYED), 102,
                 nativeControls ? i18n::text(L"Hide Android emulator controls") : i18n::text(L"Show Android emulator controls"));
+    AppendMenuW(m, MF_STRING, ClosePhoneView, i18n::text(L"Close phone view (Android keeps running)"));
     AppendMenuW(m, MF_STRING, WindowScaling, i18n::text(L"Window scaling"));
     AppendMenuW(m, MF_STRING, Rotate, i18n::text(L"Rotate phone manually"));
     if (selectedTool >= 0) {
@@ -647,6 +721,10 @@ void menu(HWND h, int selectedTool) {
 LRESULT CALLBACK barProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     static int hover = -1;
     switch (m) {
+    case DOCK_MOVED:
+        dockMoveQueued = false;
+        tick();
+        return 0;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_ERASEBKGND:
@@ -690,7 +768,9 @@ LRESULT CALLBACK barProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT r;
         GetClientRect(h, &r);
         int id = atTool(static_cast<int>(GET_Y_LPARAM(l) / scale), static_cast<int>(r.bottom / scale));
-        if (id == -1) {
+        if (id == -4) {
+            PostMessageW(launcher, ACTION_MESSAGE, ClosePhoneView, 0);
+        } else if (id == -1) {
             collapsed = !collapsed;
             WritePrivateProfileStringW(L"toolbar", L"collapsed", collapsed ? L"1" : L"0", ini().c_str());
         } else if (id == -2)
@@ -963,7 +1043,7 @@ LRESULT CALLBACK editorProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProcW(h, m, w, l);
 }
 void findWindows() {
-    DWORD pid = emulatorPid();
+    DWORD pid = cachedEmulatorPid();
     bool samePhone = pid == phonePid && emu && IsWindow(emu) && display && IsWindow(display);
     static ULONGLONG nextScan = 0;
     if (samePhone && stockBar && IsWindow(stockBar))
@@ -1109,7 +1189,7 @@ void fitPhoneWindow() {
     double ratioH = std::max(1.0, double(window.bottom - window.top - frameH) / screenH);
     int availableW = std::max(1, int((monitor.width() - toolbar - frameW) / ratioW));
     int availableH = std::max(1, int((monitor.height() - frameH) / ratioH));
-    int percent = scaling::phone(availableW, availableH, renderW, renderH, requestedPercent);
+    int percent = scaling::phone(availableW, availableH, renderW, renderH, requestedPercent, monitor.dpi);
     int width = int(std::lround(renderW * percent / 100.0 * ratioW)) + frameW;
     int height = int(std::lround(renderH * percent / 100.0 * ratioH)) + frameH;
     int leftSpace = leftDock && showBar ? int(std::lround(61 * monitor.dpi / 96.f)) : 0;
@@ -1225,6 +1305,7 @@ Profile readProfile(const std::wstring &package, bool landscape) {
 void selectProfile(const std::wstring &package, bool landscape) {
     if (!safePackage(package))
         return;
+    backgroundGame(package);
     std::lock_guard<std::mutex> g(lock);
     if (editingNow || (current.package == package && current.landscape == landscape))
         return;
@@ -1538,6 +1619,8 @@ void pollPhone() {
         release();
         return;
     }
+    if (observerReady)
+        return;
     std::string focus = adb(L"shell \"dumpsys window | grep -E 'mCurrentFocus|mRotation=[0-3]'\"", 5000);
     std::smatch p, r;
     static const std::regex package("mCurrentFocus[^\n]*? ([A-Za-z][A-Za-z0-9_.]*)/[A-Za-z0-9_.$]+"), rotation("mRotation=([0-3])");
@@ -1588,23 +1671,58 @@ void initialize(HWND owner) {
     RegisterClassExW(&wc);
     quitting = false;
     inputThread = std::thread(inputLoop);
+    hookWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (hookWake) {
+        hooksStopping = false;
+        hookThread = std::thread([] {
+            MSG message{};
+            PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+            while (!hooksStopping) {
+                bool wanted = hooksWanted && gameFocus();
+                if (wanted && !keyboardHook)
+                    keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyProc, GetModuleHandleW(nullptr), 0);
+                if (wanted && !mouseHook)
+                    mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseProc, GetModuleHandleW(nullptr), 0);
+                if (!wanted) {
+                    if (keyboardHook)
+                        UnhookWindowsHookEx(keyboardHook);
+                    if (mouseHook)
+                        UnhookWindowsHookEx(mouseHook);
+                    keyboardHook = mouseHook = nullptr;
+                }
+                while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                MsgWaitForMultipleObjectsEx(1, &hookWake, 30, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            }
+            if (keyboardHook)
+                UnhookWindowsHookEx(keyboardHook);
+            if (mouseHook)
+                UnhookWindowsHookEx(mouseHook);
+            keyboardHook = mouseHook = nullptr;
+        });
+    }
 }
 void manageHooks(bool needed) {
-    if (needed) {
-        if (!keyboardHook)
-            keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyProc, GetModuleHandleW(nullptr), 0);
-        if (!mouseHook)
-            mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseProc, GetModuleHandleW(nullptr), 0);
-    } else {
-        if (keyboardHook)
-            UnhookWindowsHookEx(keyboardHook);
-        if (mouseHook)
-            UnhookWindowsHookEx(mouseHook);
-        keyboardHook = mouseHook = nullptr;
-    }
+    // A low-level hook blocks desktop input until its installing thread responds.
+    // Keep that thread independent from UI paint, dialogs and phone discovery.
+    if (hooksWanted.exchange(needed) != needed && hookWake)
+        SetEvent(hookWake);
 }
 void tick() {
     findWindows();
+    if (dockEventsPid != phonePid) {
+        if (dockEvents)
+            UnhookWinEvent(dockEvents);
+        dockEvents = nullptr;
+        dockEventsPid = phonePid;
+        dockMoveQueued = false;
+        if (dockEventsPid)
+            dockEvents = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, dockMoved, dockEventsPid, 0,
+                                         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    }
+    taskbarIdentity.bind(emu, phonePid);
     focusEmu = emu;
     if (bar && (!IsWindow(bar) || GetWindow(bar, GW_OWNER) != emu)) {
         if (IsWindow(bar))
@@ -1646,7 +1764,11 @@ void tick() {
     bool mapped = false;
     {
         std::lock_guard<std::mutex> guard(lock);
-        mapped = current.enabled && !editingNow;
+        mapped = current.enabled && !editingNow && gameFocus() &&
+                 std::any_of(current.bindings.begin(), current.bindings.end(), [](const Binding &binding) {
+                     return binding.kind == Kind::Stick || binding.kind == Kind::Aim ||
+                            ((binding.kind == Kind::Tap || binding.kind == Kind::Swipe) && binding.key < 256);
+                 });
     }
     manageHooks(mapped);
     if (!showBar) {
@@ -1658,8 +1780,8 @@ void tick() {
     }
     scale = GetDpiForWindow(emu) / 96.f;
     int width = static_cast<int>(54 * scale),
-        height = collapsed ? static_cast<int>(86 * scale)
-                           : std::min<int>(static_cast<int>(r.bottom - r.top), static_cast<int>((88 + tools.size() * 38) * scale));
+        height = collapsed ? static_cast<int>(114 * scale)
+                           : std::min<int>(static_cast<int>(r.bottom - r.top), static_cast<int>((116 + tools.size() * 38) * scale));
     if (!bar) {
         bar = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"VeloxToolbar", i18n::text(L"Velox controls"), WS_POPUP, 0, 0, width,
                               height, emu, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -1707,7 +1829,7 @@ void tick() {
     if (nextLayout != tooltipLayout) {
         InvalidateRect(bar, nullptr, FALSE);
         tooltipLayout = nextLayout;
-        for (UINT_PTR i = 1; i <= tools.size() + 2; i++) {
+        for (UINT_PTR i = 1; i <= tools.size() + 3; i++) {
             TOOLINFOW t{};
             t.cbSize = sizeof(t);
             t.hwnd = bar;
@@ -1721,7 +1843,7 @@ void tick() {
             t.hwnd = bar;
             t.uId = i + 2;
             t.uFlags = TTF_SUBCLASS | TTF_TRANSPARENT;
-            int top = i == -1 ? 0 : 48 + i * 38;
+            int top = i == -1 ? 28 : 76 + i * 38;
             t.rect = {0, static_cast<LONG>(top * scale), width, static_cast<LONG>((top + (i == -1 ? 46 : 36)) * scale)};
             t.lpszText = const_cast<wchar_t *>(i18n::text(i == -1  ? i18n::text(L"Click to collapse · Right-click to customize")
                                                           : i == n ? i18n::text(L"More controls")
@@ -1729,6 +1851,14 @@ void tick() {
                                                                                                             : tools[order[i]].name));
             SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&t));
         }
+        TOOLINFOW close{};
+        close.cbSize = sizeof(close);
+        close.hwnd = bar;
+        close.uId = tools.size() + 3;
+        close.uFlags = TTF_SUBCLASS | TTF_TRANSPARENT;
+        close.rect = {0, 0, width, static_cast<LONG>(28 * scale)};
+        close.lpszText = const_cast<wchar_t *>(i18n::text(L"Close phone view (Android keeps running)"));
+        SendMessageW(tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&close));
     }
     if (stockBar && !nativeControls && IsWindowVisible(stockBar)) {
         stockWasVisible = true;
@@ -1782,6 +1912,21 @@ void edit(bool focus) {
         editingNow = false;
     }
 }
+void closePhoneView() {
+    findWindows();
+    release();
+    manageHooks(false);
+    DWORD pid = 0;
+    if (emu)
+        GetWindowThreadProcessId(emu, &pid);
+    if (pid && pid == phonePid) {
+        ShowWindowAsync(emu, SW_HIDE);
+        if (bar)
+            ShowWindow(bar, SW_HIDE);
+        if (stockBar)
+            ShowWindowAsync(stockBar, SW_HIDE);
+    }
+}
 void focusPhone() {
     findWindows();
     if (emu) {
@@ -1829,14 +1974,24 @@ void toggleFullscreen() {
     }
 }
 void shutdown() {
+    if (dockEvents)
+        UnhookWinEvent(dockEvents);
+    dockEvents = nullptr;
+    dockEventsPid = 0;
+    dockMoveQueued = false;
+    taskbarIdentity.reset();
     if (editor)
         SendMessageW(editor, WM_CLOSE, 0, 0);
     release();
-    if (keyboardHook)
-        UnhookWindowsHookEx(keyboardHook);
-    if (mouseHook)
-        UnhookWindowsHookEx(mouseHook);
-    keyboardHook = mouseHook = nullptr;
+    hooksStopping = true;
+    if (hookWake)
+        SetEvent(hookWake);
+    if (hookThread.joinable())
+        hookThread.join();
+    if (hookWake)
+        CloseHandle(hookWake);
+    hookWake = nullptr;
+    hooksWanted = false;
     quitting = true;
     if (inputThread.joinable())
         inputThread.join();
@@ -1855,7 +2010,10 @@ void renderToolbar(gp::Graphics &gr, int width, int height, int hover, bool comp
     gr.ScaleTransform(s, s);
     gp::SolidBrush background{gp::Color(0xff191c2c)};
     art::fillRound(gr, gp::RectF(1, 1, 52, height / s - 2), 15, background);
-    art::logo(gr, 13, 9, 28);
+    gp::SolidBrush closeBackground{gp::Color(hover == -4 ? 0xff663142 : 0xff242738)};
+    art::fillRound(gr, gp::RectF(7, 4, 40, 24), 8, closeBackground);
+    drawText(gr, L"×", gp::RectF(7, 2, 40, 26), 20, hover == -4 ? C_TEXT : C_DIM, true);
+    art::logo(gr, 15, 36, 24);
     int n = compact ? 0 : visibleTools(static_cast<int>(height / s));
     gp::Font icon(L"Segoe MDL2 Assets", 18, gp::FontStyleRegular, gp::UnitPixel);
     gp::StringFormat fmt;
@@ -1864,13 +2022,13 @@ void renderToolbar(gp::Graphics &gr, int width, int height, int hover, bool comp
     gp::SolidBrush fg{gp::Color(0xffc8c8e0)};
     for (int i = 0; i < n; i++) {
         fg.SetColor(gp::Color(tools[order[i]].action == Record && recording() ? C_BAD : 0xffc8c8e0));
-        gp::RectF rect(7, static_cast<float>(48 + i * 38), 40, 34);
+        gp::RectF rect(7, static_cast<float>(76 + i * 38), 40, 34);
         if (hover == i) {
             gp::LinearGradientBrush active(rect, gp::Color(0xff7253d9), gp::Color(0xff3c5fae), gp::LinearGradientModeHorizontal);
             art::fillRound(gr, rect, 10, active);
         }
         gr.DrawString(tools[order[i]].icon, -1, &icon, rect, &fmt, &fg);
     }
-    drawText(gr, L"•••", gp::RectF(6, static_cast<float>(48 + n * 38), 42, 32), 16, C_DIM, true);
+    drawText(gr, L"•••", gp::RectF(6, static_cast<float>(76 + n * 38), 42, 32), 16, C_DIM, true);
 }
 } // namespace phone::playtools

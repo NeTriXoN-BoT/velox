@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>app.velox.Velox</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Velox</name>
+  <summary>Your Android gaming workspace</summary>
+  <summary xml:lang="de">Dein Android-Spielbereich</summary>
+  <developer id="app.velox"><name>Velox contributors</name></developer>
+  <description>
+    <p>Play Android games in a desktop phone with a game library, keyboard and mouse controls, controller support and a custom Velox interface.</p>
+    <p>Set up Android automatically after accepting the Google SDK license. Independent phones, per-game presets, local backups and recovery keep your play space organized.</p>
+    <p xml:lang="de">Spiele Android-Spiele auf einem Desktop-Handy mit Spielebibliothek, Tastatur- und Maussteuerung, Controller-Unterstützung und eigener Velox-Oberfläche.</p>
+    <p xml:lang="de">Richte Android nach Annahme der Google-SDK-Lizenz automatisch ein. Unabhängige Handys, Spielprofile, lokale Sicherungen und Wiederherstellung sorgen für Ordnung.</p>
+  </description>
+  <launchable type="desktop-id">app.velox.Velox.desktop</launchable>
+  <categories><category>Game</category><category>Emulator</category></categories>
+  <url type="homepage">https://github.com/NeTriXoN-BoT/velox</url>
+  <url type="bugtracker">https://github.com/NeTriXoN-BoT/velox/issues</url>
+  <provides><binary>AppRun</binary></provides>
+</component>
